@@ -47,6 +47,26 @@ def run_test_server(ensure_test_server_image):
 
 
 @pytest.fixture(scope="session")
+def run_second_server(ensure_test_server_image):
+    """Run a test server in a Docker container."""
+    client = docker.from_env()
+    try:  # check to see if the container is already running
+        container = client.containers.get("hussh-test-server2")
+    except docker.errors.NotFound:  # if not, start it
+        container = client.containers.run(
+            "hussh-test-server",
+            detach=True,
+            ports={"22/tcp": 8023},
+            name="hussh-test-server2",
+        )
+        time.sleep(5)  # give the server time to start
+    yield container
+    container.stop()
+    container.remove()
+    client.close()
+
+
+@pytest.fixture(scope="session")
 def setup_agent_auth():
     # Define the key paths
     base_key = TESTDIR / "data/test_key"
