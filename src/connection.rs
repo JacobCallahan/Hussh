@@ -61,7 +61,6 @@ use ssh2::{Channel, Session};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-// use ssh2::FileStat;
 
 const MAX_BUFF_SIZE: usize = 65536;
 create_exception!(
@@ -180,15 +179,21 @@ impl SSHResult {
 /// * `local_path`: The path to the file on the local system.
 /// * `remote_path`: The path to save the file on the remote system.
 ///
-/// ### `__repr__`
-///
-/// Returns a string representation of the `Connection` instance.
-///
 /// ### `shell`
 ///
 /// Creates an `InteractiveShell` instance. It takes the following parameter:
 ///
-/// * `pty`: Whether to request a pseudo-terminal for the shell. If not provided, a pseudo-terminal is not requested.
+/// ### `remote_copy`
+///
+/// Copies a file from this connection to another connection. It takes the following parameters:
+///
+/// * `source_path`: The path to the file on the remote system.
+/// * `dest_conn`: The destination connection to copy the file to.
+/// * `dest_path`: The path to save the file on the destination system. If not provided, the source path is used.
+///
+/// ### `__repr__`
+///
+/// Returns a string representation of the `Connection` instance.
 #[pyclass]
 pub struct Connection {
     session: Session,
@@ -207,6 +212,17 @@ pub struct Connection {
     sftp_conn: Option<ssh2::Sftp>,
 }
 
+// Non-public methods for the Connection class
+impl Connection {
+    // Emulate a python-like sftp property
+    fn sftp(&mut self) -> &ssh2::Sftp {
+        if self.sftp_conn.is_none() {
+            self.sftp_conn = Some(self.session.sftp().unwrap());
+        }
+        self.sftp_conn.as_ref().unwrap()
+    }
+}
+
 #[pymethods]
 impl Connection {
     #[new]
@@ -222,7 +238,7 @@ impl Connection {
         let port = port.unwrap_or(22);
         // combine the host and port into a single string
         let conn_str = format!("{}:{}", host, port);
-        let tcp_conn = TcpStream::connect(&conn_str)
+        let tcp_conn = TcpStream::connect(conn_str)
             .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
         let mut session = Session::new().unwrap();
         // if a timeout is set, use it
@@ -237,9 +253,9 @@ impl Connection {
         let password = password.unwrap_or("".to_string());
         let private_key = private_key.unwrap_or("".to_string());
         // if private_key is set, use it to authenticate
-        if private_key != "" {
+        if !private_key.is_empty() {
             // if a password is set, use it to decrypt the private key
-            if password != "" {
+            if !password.is_empty() {
                 session
                     .userauth_pubkey_file(&username, None, Path::new(&private_key), Some(&password))
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
@@ -249,7 +265,7 @@ impl Connection {
                     .userauth_pubkey_file(&username, None, Path::new(&private_key), None)
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
             }
-        } else if password != "" {
+        } else if !password.is_empty() {
             session
                 .userauth_password(&username, &password)
                 .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
@@ -311,7 +327,7 @@ impl Connection {
     /// Writes a file over SCP.
     fn scp_write(&self, local_path: String, remote_path: String) -> PyResult<()> {
         // if remote_path is a directory, append the local file name to the remote path
-        let remote_path = if remote_path.ends_with("/") {
+        let remote_path = if remote_path.ends_with('/') {
             format!(
                 "{}/{}",
                 remote_path,
@@ -366,16 +382,7 @@ impl Connection {
     /// If `local_path` is provided, the file is saved to the local system.
     /// Otherwise, the contents of the file are returned as a string.
     fn sftp_read(&mut self, remote_path: String, local_path: Option<String>) -> PyResult<String> {
-        if self.sftp_conn.is_none() {
-            self.sftp_conn = Some(self.session.sftp().unwrap());
-        }
-        let mut remote_file = BufReader::new(
-            self.sftp_conn
-                .as_ref()
-                .unwrap()
-                .open(Path::new(&remote_path))
-                .unwrap(),
-        );
+        let mut remote_file = BufReader::new(self.sftp().open(Path::new(&remote_path)).unwrap());
         match local_path {
             Some(local_path) => {
                 let local_file = std::fs::File::create(local_path)?;
@@ -403,16 +410,7 @@ impl Connection {
     fn sftp_write(&mut self, local_path: String, remote_path: String) -> PyResult<()> {
         let mut local_file = std::fs::File::open(&local_path).unwrap();
         let metadata = local_file.metadata().unwrap();
-        // If we don't already have an SFTP connection, create one
-        if self.sftp_conn.is_none() {
-            self.sftp_conn = Some(self.session.sftp().unwrap());
-        }
-        let mut remote_file = self
-            .sftp_conn
-            .as_ref()
-            .unwrap()
-            .create(Path::new(&remote_path))
-            .unwrap();
+        let mut remote_file = self.sftp().create(Path::new(&remote_path)).unwrap();
         // create a variable-sized buffer to read the file and loop until EOF
         let mut read_buffer = vec![0; std::cmp::min(metadata.len() as usize, MAX_BUFF_SIZE)];
         loop {
@@ -422,29 +420,42 @@ impl Connection {
             }
             remote_file.write(&read_buffer[..bytes_read])?;
         }
-        // let stat = FileStat {
-        //     size: None,
-        //     uid: None,
-        //     gid: None,
-        //     perm: Some(0o644),
-        //     atime: None,
-        //     mtime: None,
-        // };
-        // remote_file.setstat(stat).unwrap();
         remote_file.close().unwrap();
         Ok(())
     }
 
     /// Writes data over SFTP.
-    fn sftp_write_data(&self, data: String, remote_path: String) -> PyResult<()> {
-        let mut remote_file = self
-            .session
-            .sftp()
-            .unwrap()
-            .create(Path::new(&remote_path))
-            .unwrap();
+    fn sftp_write_data(&mut self, data: String, remote_path: String) -> PyResult<()> {
+        let mut remote_file = self.sftp().create(Path::new(&remote_path)).unwrap();
         remote_file.write_all(data.as_bytes()).unwrap();
         remote_file.close().unwrap();
+        Ok(())
+    }
+
+    // Copy a file from this connection to another connection
+    fn remote_copy(
+        &self,
+        source_path: String,
+        dest_conn: &mut Connection,
+        dest_path: Option<String>,
+    ) -> PyResult<()> {
+        let mut remote_file = BufReader::new(
+            self.session
+                .sftp()
+                .unwrap()
+                .open(Path::new(&source_path))
+                .unwrap(),
+        );
+        let dest_path = dest_path.unwrap_or_else(|| source_path.clone());
+        let mut other_file = dest_conn.sftp().create(Path::new(&dest_path)).unwrap();
+        let mut buffer = vec![0; MAX_BUFF_SIZE];
+        loop {
+            let len = remote_file.read(&mut buffer).unwrap();
+            if len == 0 {
+                break;
+            }
+            other_file.write_all(&buffer[..len]).unwrap();
+        }
         Ok(())
     }
 
@@ -515,7 +526,7 @@ impl InteractiveShell {
     /// If you don't want to add a newline at the end of the command, set `add_newline` to `false`.
     fn send(&mut self, data: String, add_newline: Option<bool>) -> PyResult<()> {
         let add_newline = add_newline.unwrap_or(true);
-        let data = if add_newline && !data.ends_with("\n") {
+        let data = if add_newline && !data.ends_with('\n') {
             format!("{}\n", data)
         } else {
             data
@@ -536,9 +547,9 @@ impl InteractiveShell {
 
     fn __exit__(
         &mut self,
-        _exc_type: Option<&PyAny>,
-        _exc_value: Option<&PyAny>,
-        _traceback: Option<&PyAny>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.exit_result = Some(self.read());
         Ok(())

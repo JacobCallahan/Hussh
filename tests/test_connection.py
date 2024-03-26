@@ -152,3 +152,14 @@ def test_connection_timeout():
     """Test that we can trigger a timeout on connect."""
     with pytest.raises(TimeoutError):
         Connection(host="localhost", port=8022, password="toor", timeout=10)
+
+
+def test_remote_copy(conn, run_second_server):
+    """Test that we can copy a file from one server to another."""
+    # First copy the test file to the first server
+    conn.scp_write(str(TEXT_FILE), "/root/hp.txt")
+    assert "hp.txt" in conn.execute("ls /root").stdout
+    # Now copy the file from the first server to the second server
+    dest_conn = Connection(host="localhost", port=8023, password="toor")
+    conn.remote_copy("/root/hp.txt", dest_conn)
+    assert "hp.txt" in dest_conn.execute("ls /root").stdout
