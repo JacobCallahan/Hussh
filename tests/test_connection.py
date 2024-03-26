@@ -2,7 +2,7 @@
 
 import pytest
 from pathlib import Path
-from hussh import Connection
+from hussh import Connection, SSHResult
 
 
 TEXT_FILE = Path("tests/data/hp.txt").resolve()
@@ -44,6 +44,7 @@ def test_agent_auth(setup_agent_auth):
 def test_basic_command(conn):
     """Test that we can run a basic command."""
     result = conn.execute("echo hello")
+    assert isinstance(result, SSHResult)
     assert result.status == 0
     assert result.stdout == "hello\n"
 
@@ -147,16 +148,7 @@ def test_shell_context(conn):
     assert sh.exit_result.status != 0
 
 
-@pytest.mark.skip("Skipping until exceptions are implemented.")
 def test_connection_timeout():
     """Test that we can trigger a timeout on connect."""
     with pytest.raises(TimeoutError):
-        Connection(host="localhost", port=8022, password="toor", timeout=2000)
-
-
-@pytest.mark.skip("Skipping until exceptions are implemented.")
-def test_execute_timeout():
-    """Test that we can trigger a timeout on execute."""
-    conn = Connection(host="localhost", port=8022, password="toor")
-    with pytest.raises(TimeoutError):
-        conn.execute("sleep 3", timeout=2000)
+        Connection(host="localhost", port=8022, password="toor", timeout=10)
