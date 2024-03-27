@@ -163,3 +163,13 @@ def test_remote_copy(conn, run_second_server):
     dest_conn = Connection(host="localhost", port=8023, password="toor")
     conn.remote_copy("/root/hp.txt", dest_conn)
     assert "hp.txt" in dest_conn.execute("ls /root").stdout
+
+
+def test_tail(conn):
+    """Test that we can tail a file."""
+    conn.scp_write_data("hello\nworld\n", "/root/hello.txt")
+    with conn.tail("/root/hello.txt") as tf:
+        assert tf.read(0) == "hello\nworld\n"
+        assert tf.last_pos == 12
+        conn.execute("echo goodbye >> /root/hello.txt")
+    assert tf.tailed_contents == "goodbye\n"
