@@ -75,6 +75,17 @@ conn.sftp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
 contents = conn.sftp_read(remote_path="/dest/path/file")
 ```
 
+## Copy files from one connection to another
+Hussh offers a shortcut that allows you to copy a file between two established connections.
+```python
+source_conn = Connection("my.first.server")
+dest_conn = Connection("my.second.server", password="secret")
+# Copy from source to destination
+source_conn.remote_copy(source_path="/root/myfile.txt", dest_conn=dest_conn)
+```
+By default, if you don't pass in an alternate `dest_path`, Hussh will copy it to the same path as it came from on source.
+
+
 # SCP
 For remote servers that support SCP, Hussh can do that to.
 
@@ -95,16 +106,15 @@ conn.scp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
 contents = conn.scp_read(remote_path="/dest/path/file")
 ```
 
-## Copy files from one connection to another
-Hussh offers a shortcut that allows you to copy a file between two established connections.
+# Tailing Files
+Hussh offers a built-in method for tailing files on a `Connection` with the `tail` method.
 ```python
-source_conn = Connection("my.first.server")
-dest_conn = Connection("my.second.server", password="secret")
-# Copy from source to destination
-source_conn.remote_copy(source_path="/root/myfile.txt", dest_conn=dest_conn)
+with conn.tail("/path/to/file.txt") as tf:
+   # perform some actions or wait
+   print(tf.read())  # at any time, you can read any unread contents
+   # when you're done tailing, exit the context manager
+print(tf.tailed_contents)
 ```
-By default, if you don't pass in an alternate `dest_path`, Hussh will copy it to the same path as it came from on source.
-
 
 # Interactive Shell
 If you need to keep a shell open to perform more complex interactions, you can get an `InteractiveShell` instance from the `Connection` class instance.

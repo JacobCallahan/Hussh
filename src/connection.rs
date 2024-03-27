@@ -58,7 +58,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyTimeoutError;
 use pyo3::prelude::*;
 use ssh2::{Channel, Session};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::net::TcpStream;
 use std::path::Path;
 
@@ -459,6 +459,19 @@ impl Connection {
         Ok(())
     }
 
+    /// Return a FileTailer instance given a remote file path
+    /// This is best used as a context manager, but can be used directly
+    /// ```python
+    /// with conn.tail("remote_file.log") as tailer:
+    ///     time.sleep(5)  # wait or perform other operations
+    ///     print(tailer.read())
+    ///     time.sleep(5)  # wait or perform other operations
+    /// print(tailer.tailed_contents)
+    /// ```
+    fn tail(&self, remote_file: String) -> FileTailer {
+        FileTailer::new(self, remote_file, None)
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
             "Connection(host={}, port={}, username={}, password=*****)",
@@ -552,6 +565,95 @@ impl InteractiveShell {
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.exit_result = Some(self.read());
+        Ok(())
+    }
+}
+
+
+/// `FileTailer` is a structure that represents a remote file tailer.
+///
+/// It maintains an SFTP connection and the path to a remote file,
+/// and allows reading from a specified position in the file.
+///
+/// # Fields
+///
+/// * `sftp_conn`: An SFTP connection from the ssh2 crate.
+/// * `remote_file`: A string representing the path to the remote file.
+/// * `init_pos`: An optional initial position from where to start reading the file.
+/// * `last_pos`: The last position read from the file.
+/// * `tailed_contents`: The contents read from the file.
+///
+/// # Methods
+///
+/// * `new`: Constructs a new `FileTailer`.
+/// * `seek_end`: Seeks to the end of the remote file.
+/// * `read`: Reads the contents of the remote file from a given position.
+/// * `__enter__`: Prepares the `FileTailer` for use in a `with` statement.
+/// * `__exit__`: Cleans up after the `FileTailer` is used in a `with` statement.
+#[pyclass]
+struct FileTailer {
+    sftp_conn: ssh2::Sftp,
+    #[pyo3(get)]
+    remote_file: String,
+    init_pos: Option<u64>,
+    #[pyo3(get)]
+    last_pos: u64,
+    #[pyo3(get)]
+    tailed_contents: Option<String>,
+}
+
+#[pymethods]
+impl FileTailer {
+    #[new]
+    fn new(
+        conn: &Connection,
+        remote_file: String,
+        init_pos: Option<u64>,
+    ) -> FileTailer {
+        FileTailer {
+            sftp_conn: conn.session.sftp().unwrap(),
+            remote_file,
+            init_pos,
+            last_pos: 0,
+            tailed_contents: None,
+        }
+    }
+
+    // Determine the current end of the remote file
+    fn seek_end(&mut self) -> PyResult<Option<u64>> {
+        let len = self.sftp_conn.stat(Path::new(&self.remote_file)).unwrap().size;
+        self.last_pos = len.unwrap();
+        if !self.init_pos.is_some() {
+            self.init_pos = len;
+        }
+        Ok(len)
+    }
+
+    // Read the contents of the remote file from a given position
+    fn read(&mut self, from_pos: Option<u64>) -> String {
+        let from_pos = from_pos.unwrap_or(self.last_pos);
+        let mut remote_file = BufReader::new(
+            self.sftp_conn.open(Path::new(&self.remote_file)).unwrap(),
+        );
+        remote_file.seek(std::io::SeekFrom::Start(from_pos)).unwrap();
+        let mut contents = String::new();
+        remote_file.read_to_string(&mut contents).unwrap();
+        self.last_pos = remote_file.seek(std::io::SeekFrom::Current(0)).unwrap();
+        contents
+    }
+
+    fn __enter__(mut slf: PyRefMut<Self>) -> PyResult<PyRefMut<Self>> {
+        slf.seek_end()?;
+        Ok(slf)
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        self.tailed_contents = Some(self.read(self.init_pos));
         Ok(())
     }
 }
