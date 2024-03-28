@@ -10,6 +10,7 @@ on:
       - "*.md"
       - "*.example"
       - ".gitignore"
+      - "benchmarks/**"
 
 permissions:
   contents: read

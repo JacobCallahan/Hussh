@@ -1,0 +1,8 @@
+# requirements for benchmarking common ssh libraries
+hussh
+fabric  # also fulfills paramiko
+# pylibssh
+ssh2-python312
+
+# used for benchmarking memory usage
+memray
