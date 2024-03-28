@@ -1,3 +1,8 @@
+# Benchmark Testing
+Benchmarks against ssh libraries are difficult due to network connection variations.
+Libraries are likely to vary from run to run. However, there are some things we can do to reduce this uncertainty.
+The first is to remove as much network variability as we reasonably can by running a local test server (see below).
+It is also a good idea to run benchmarks a few times and run an average. 
 
 ## Install benchmarking requirements
 First, you will either need to have your own test target, putting that information in the `target.json` file in this directory.
@@ -12,25 +17,14 @@ pip install -r requirements.txt
 ```
 
 ## Running all benchmark scripts
-To run the test scripts, you can either manually run each one, or use this bash loop.
+To run the test scripts, you just need to execute the run_benchmarks.py script.
 ```bash
-for file in bench_*.py; do echo "$file"; python "$file"; done
+python run_benchmarks.py
+```
+This will ultimately collect all the benchmark and memray information into a table.
+
+Alternatively, if you'd prefer to run individual benchmarks, you can do that.
+```bash
+python test_hussh.py
 ```
 This will also create a memray output file for each script ran.
-We'll use these in the next step.
-
-## Getting the total memory consumption for all benchmarks
-This loop will get summaries for each benchmark's memory consumption and pull out the total memory and allocations.
-```bash
-for file in memray-bench_*; do echo "$file"; memray summary -r 1 "$file" | grep " at " | tr -d '[:space:]' | awk -F '│' '{print "Memory: " $3 ", Allocations: " $7}'; done
-```
-
-## Cleanup
-You likely don't want the memray files to hang around, so you can easily delete them by running this.
-```bash
-rm -f memray-bench_*
-```
-
-# ToDo
-- Improve reporting by putting it all in a nice table.
-- Remove the need to execute commands manually by scripting it all.
