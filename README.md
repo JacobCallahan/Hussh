@@ -1,4 +1,8 @@
 # Hussh: SSH for humans.
+[![image](https://img.shields.io/pypi/v/hussh.svg)](https://pypi.python.org/pypi/hussh)
+[![image](https://img.shields.io/pypi/pyversions/hussh.svg)](https://pypi.python.org/pypi/hussh)
+[![Actions status](https://github.com/jacobcallahan/hussh/actions/workflows/build_and_test.yml/badge.svg)](https://github.com/jacobcallahan/hussh/actions)
+
 Hussh (pronounced "hush") is a client-side ssh library that offers low level performance through a high level interface.
 
 Hussh uses [pyo3](https://docs.rs/pyo3/latest/pyo3/) to create Python bindings around the [ssh2](https://docs.rs/ssh2/latest/ssh2/) library for Rust.
@@ -23,6 +27,25 @@ That's it! One import and class instantion is all you need to:
 - Perform SCP actions
 - Perform SFTP actions
 - Get an interactive shell
+
+# Why Hussh?
+- 🔥 Blazingly fast!
+- 🪶 Incredibly lightweight!
+- 🧠 Super easy to use!
+
+## Benchmarks
+Hussh demonstrates the performance you'd expect from a low level ssh library.
+Hussh is also much lighter weight in both total memory and memory allocations.
+
+Local Server
+![Local Server Benchmarks](benchmarks/local_server_bench.png)
+
+Remote Server
+![Remote Server Benchmarks](benchmarks/remote_server_bench.png)
+
+### Try it for yourself!
+Hussh's benchmark script are also open sourced in the `benchmarks` directory in this repository.
+Clone the repo, follow the setup instructions, then let us know how it did!
 
 # Authentication
 You've already seen password-based authentication, but here it is again.
@@ -138,6 +161,7 @@ With that said, try it out and let me know your thoughts!
 
 # Future Features
 - Proper exception handling
+- Concurrent actions class
 - Async Connection class
 - Low level bindings
 - Misc codebase improvements

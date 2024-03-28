@@ -1,14 +1,19 @@
 import json
 import memray
 import timeit
+from pprint import pprint
 from pathlib import Path
 
-with memray.Tracker("memray-bench_fabric.bin"):
+results_dict = {}
+
+if (mem_path := Path("memray-bench_fabric.bin")).exists():
+    mem_path.unlink()
+with memray.Tracker("memray-bench_fabric.bin", native_traces=True, follow_fork=True):
     start_time = timeit.default_timer()
 
     from fabric import Connection
 
-    import_time = timeit.default_timer() - start_time
+    results_dict["import_time"] = f"{(timeit.default_timer() - start_time) * 1000:.2f} ms"
     host_info = json.loads(Path("target.json").read_text())
 
     temp_time = timeit.default_timer()
@@ -23,53 +28,51 @@ with memray.Tracker("memray-bench_fabric.bin"):
         },
     )
     conn.open()
-    connect_time = timeit.default_timer() - temp_time
+    results_dict["connect_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
 
     temp_time = timeit.default_timer()
     result = conn.run("echo test")
-    run_time = timeit.default_timer() - temp_time
+    results_dict["cmd_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
 
     # small file (1kb)
     temp_time = timeit.default_timer()
     conn.put("1kb.txt", "/root/1kb.txt")
-    s_put_time = timeit.default_timer() - temp_time
+    results_dict["s_put_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
 
     temp_time = timeit.default_timer()
     conn.get("/root/1kb.txt", "small.txt")
-    s_get_time = timeit.default_timer() - temp_time
+    results_dict["s_get_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
     Path("small.txt").unlink()
 
     # medium file (14kb)
     temp_time = timeit.default_timer()
     conn.put("14kb.txt", "/root/14kb.txt")
-    m_put_time = timeit.default_timer() - temp_time
+    results_dict["m_put_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
 
     temp_time = timeit.default_timer()
     conn.get("/root/14kb.txt", "medium.txt")
-    m_get_time = timeit.default_timer() - temp_time
+    results_dict["m_get_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
     Path("medium.txt").unlink()
 
     # large file (64kb)
     temp_time = timeit.default_timer()
     conn.put("64kb.txt", "/root/64kb.txt")
-    l_put_time = timeit.default_timer() - temp_time
+    results_dict["l_put_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
 
     temp_time = timeit.default_timer()
     conn.get("/root/64kb.txt", "large.txt")
-    l_get_time = timeit.default_timer() - temp_time
+    results_dict["l_get_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
     Path("large.txt").unlink()
 
     conn.close()
 
-    total_time = timeit.default_timer() - start_time
+    results_dict["total_time"] = f"{(timeit.default_timer() - start_time) * 1000:.2f} ms"
 
-print(f"import_time: {import_time * 1000:.2f} ms")
-print(f"connect_time: {connect_time * 1000:.2f} ms")
-print(f"run_time: {run_time * 1000:.2f} ms")
-print(f"s_put_time: {s_put_time * 1000:.2f} ms")
-print(f"s_get_time: {s_get_time * 1000:.2f} ms")
-print(f"m_put_time: {m_put_time * 1000:.2f} ms")
-print(f"m_get_time: {m_get_time * 1000:.2f} ms")
-print(f"l_put_time: {l_put_time * 1000:.2f} ms")
-print(f"l_get_time: {l_get_time * 1000:.2f} ms")
-print(f"total_time: {total_time * 1000:.2f} ms")
+pprint(results_dict, sort_dicts=False)
+
+if Path("bench_results.json").exists():
+   results = json.loads(Path("bench_results.json").read_text())
+else:
+    results = {}
+results.update({"fabric": results_dict})
+Path("bench_results.json").write_text(json.dumps(results, indent=2))
