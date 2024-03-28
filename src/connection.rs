@@ -226,6 +226,7 @@ impl Connection {
 #[pymethods]
 impl Connection {
     #[new]
+    #[pyo3(text_signature = "(host, /, port=22, username='root', password=None, private_key=None, timeout=0)")]
     fn new(
         host: String,
         port: Option<i32>,
@@ -407,8 +408,10 @@ impl Connection {
     }
 
     /// Writes a file over SFTP.
-    fn sftp_write(&mut self, local_path: String, remote_path: String) -> PyResult<()> {
+    /// If `remote_path` is not provided, the local file is written to the same path on the remote system.
+    fn sftp_write(&mut self, local_path: String, remote_path: Option<String>) -> PyResult<()> {
         let mut local_file = std::fs::File::open(&local_path).unwrap();
+        let remote_path = remote_path.unwrap_or_else(|| local_path.clone());
         let metadata = local_file.metadata().unwrap();
         let mut remote_file = self.sftp().create(Path::new(&remote_path)).unwrap();
         // create a variable-sized buffer to read the file and loop until EOF
@@ -484,8 +487,8 @@ impl Connection {
     /// Note: This is best used as a context manager
     /// ```python
     /// with conn.shell() as shell:
-    ///   shell.send("ls")
-    ///  shell.send("pwd")
+    ///     shell.send("ls")
+    ///     shell.send("pwd")
     /// print(shell.exit_result.stdout)
     /// ```
     fn shell(&self, pty: Option<bool>) -> PyResult<InteractiveShell> {
