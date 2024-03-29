@@ -1,8 +1,9 @@
 import json
-import memray
-import timeit
-from pprint import pprint
 from pathlib import Path
+from pprint import pprint
+import timeit
+
+import memray
 
 results_dict = {}
 
@@ -11,6 +12,7 @@ if (mem_path := Path("memray-bench_paramiko.bin")).exists():
 with memray.Tracker("memray-bench_paramiko.bin"):
     start_time = timeit.default_timer()
     import paramiko
+
     results_dict["import_time"] = f"{(timeit.default_timer() - start_time) * 1000:.2f} ms"
 
     host_info = json.loads(Path("target.json").read_text())
@@ -32,7 +34,6 @@ with memray.Tracker("memray-bench_paramiko.bin"):
     stdin, stdout, stderr = ssh.exec_command("echo test")
     result = stdout.read()
     results_dict["cmd_time"] = f"{(timeit.default_timer() - temp_time) * 1000:.2f} ms"
-
 
     # small file (1kb)
     temp_time = timeit.default_timer()
@@ -73,7 +74,7 @@ with memray.Tracker("memray-bench_paramiko.bin"):
 pprint(results_dict, sort_dicts=False)
 
 if Path("bench_results.json").exists():
-   results = json.loads(Path("bench_results.json").read_text())
+    results = json.loads(Path("bench_results.json").read_text())
 else:
     results = {}
 results.update({"paramiko": results_dict})

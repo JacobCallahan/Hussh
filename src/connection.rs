@@ -226,7 +226,9 @@ impl Connection {
 #[pymethods]
 impl Connection {
     #[new]
-    #[pyo3(text_signature = "(host, /, port=22, username='root', password=None, private_key=None, timeout=0)")]
+    #[pyo3(
+        text_signature = "(host, /, port=22, username='root', password=None, private_key=None, timeout=0)"
+    )]
     fn new(
         host: String,
         port: Option<i32>,
@@ -355,7 +357,7 @@ impl Connection {
             if bytes_read == 0 {
                 break;
             }
-            remote_file.write(&read_buffer[..bytes_read]).unwrap();
+            remote_file.write_all(&read_buffer[..bytes_read]).unwrap();
         }
         remote_file.flush().unwrap();
         remote_file.send_eof().unwrap();
@@ -421,7 +423,7 @@ impl Connection {
             if bytes_read == 0 {
                 break;
             }
-            remote_file.write(&read_buffer[..bytes_read])?;
+            remote_file.write_all(&read_buffer[..bytes_read])?;
         }
         remote_file.close().unwrap();
         Ok(())
@@ -572,7 +574,6 @@ impl InteractiveShell {
     }
 }
 
-
 /// `FileTailer` is a structure that represents a remote file tailer.
 ///
 /// It maintains an SFTP connection and the path to a remote file,
@@ -608,11 +609,7 @@ struct FileTailer {
 #[pymethods]
 impl FileTailer {
     #[new]
-    fn new(
-        conn: &Connection,
-        remote_file: String,
-        init_pos: Option<u64>,
-    ) -> FileTailer {
+    fn new(conn: &Connection, remote_file: String, init_pos: Option<u64>) -> FileTailer {
         FileTailer {
             sftp_conn: conn.session.sftp().unwrap(),
             remote_file,
@@ -624,9 +621,13 @@ impl FileTailer {
 
     // Determine the current end of the remote file
     fn seek_end(&mut self) -> PyResult<Option<u64>> {
-        let len = self.sftp_conn.stat(Path::new(&self.remote_file)).unwrap().size;
+        let len = self
+            .sftp_conn
+            .stat(Path::new(&self.remote_file))
+            .unwrap()
+            .size;
         self.last_pos = len.unwrap();
-        if !self.init_pos.is_some() {
+        if self.init_pos.is_none() {
             self.init_pos = len;
         }
         Ok(len)
@@ -635,13 +636,14 @@ impl FileTailer {
     // Read the contents of the remote file from a given position
     fn read(&mut self, from_pos: Option<u64>) -> String {
         let from_pos = from_pos.unwrap_or(self.last_pos);
-        let mut remote_file = BufReader::new(
-            self.sftp_conn.open(Path::new(&self.remote_file)).unwrap(),
-        );
-        remote_file.seek(std::io::SeekFrom::Start(from_pos)).unwrap();
+        let mut remote_file =
+            BufReader::new(self.sftp_conn.open(Path::new(&self.remote_file)).unwrap());
+        remote_file
+            .seek(std::io::SeekFrom::Start(from_pos))
+            .unwrap();
         let mut contents = String::new();
         remote_file.read_to_string(&mut contents).unwrap();
-        self.last_pos = remote_file.seek(std::io::SeekFrom::Current(0)).unwrap();
+        self.last_pos = remote_file.stream_position().unwrap();
         contents
     }
 
