@@ -1,6 +1,7 @@
 # Hussh: SSH for humans.
 [![image](https://img.shields.io/pypi/v/hussh.svg)](https://pypi.python.org/pypi/hussh)
 [![image](https://img.shields.io/pypi/pyversions/hussh.svg)](https://pypi.python.org/pypi/hussh)
+![PyPI - Wheel](https://img.shields.io/pypi/wheel/hussh)
 [![Actions status](https://github.com/jacobcallahan/hussh/actions/workflows/build_and_test.yml/badge.svg)](https://github.com/jacobcallahan/hussh/actions)
 
 Hussh (pronounced "hush") is a client-side ssh library that offers low level performance through a high level interface.

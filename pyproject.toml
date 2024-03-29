@@ -34,13 +34,64 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
-    "ruff",
-    "maturin",
-    "pytest",
     "docker",
-    "pexpect",
+    "maturin",
     "patchelf; sys_platform == 'linux'",
+    "pexpect",
+    "pre-commit",
+    "pytest",
+    "ruff",
 ]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-v", "-l", "--color=yes", "--code-highlight=yes"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+select = [
+    "B",  # bugbear
+    "C90", # mccabe
+    "E",  # pycodestyle
+    "F",  # flake8
+    "G", # flake8-logging-format
+    "I", # isort
+    "PERF", # Perflint rules
+    "PLC", # pylint
+    "PLE", # pylint
+    "PLR", # pylint
+    "PLW", # pylint
+    "PTH", # Use pathlib
+    "PT",  # flake8-pytest
+    "RET",  # flake8-return
+    "RUF", # Ruff-specific rules
+    "SIM",  # flake8-simplify
+    "UP",  # pyupgrade
+    "W",  # pycodestyle
+]
+ignore = [
+    "B019",  # lru_cache can lead to memory leaks - acceptable tradeoff
+    "PT004", # pytest underscrore prefix for non-return fixtures
+    "PT005", # pytest no underscrore prefix for return fixtures
+]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = [
+    "hussh",
+]
+combine-as-imports = true
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+mark-parentheses = false
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20

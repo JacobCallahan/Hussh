@@ -1,8 +1,9 @@
 import json
-import memray
-import timeit
-from pprint import pprint
 from pathlib import Path
+from pprint import pprint
+import timeit
+
+import memray
 
 results_dict = {}
 
@@ -11,8 +12,10 @@ if (mem_path := Path("memray-bench_ssh2-python.bin")).exists():
 with memray.Tracker("memray-bench_ssh2-python.bin"):
     start_time = timeit.default_timer()
     import socket
-    from ssh2.session import Session
+
     from ssh2 import sftp
+    from ssh2.session import Session
+
     results_dict["import_time"] = f"{(timeit.default_timer() - start_time) * 1000:.2f} ms"
 
     host_info = json.loads(Path("target.json").read_text())
@@ -50,9 +53,7 @@ with memray.Tracker("memray-bench_ssh2-python.bin"):
         | sftp.LIBSSH2_SFTP_S_IRGRP
         | sftp.LIBSSH2_SFTP_S_IROTH
     )
-    FILE_FLAGS = (
-        sftp.LIBSSH2_FXF_CREAT | sftp.LIBSSH2_FXF_WRITE | sftp.LIBSSH2_FXF_TRUNC
-    )
+    FILE_FLAGS = sftp.LIBSSH2_FXF_CREAT | sftp.LIBSSH2_FXF_WRITE | sftp.LIBSSH2_FXF_TRUNC
     data = Path("1kb.txt").read_bytes()
     sftp_conn = session.sftp_init()
     with sftp_conn.open("/root/1kb.txt", FILE_FLAGS, SFTP_MODE) as f:
@@ -61,7 +62,7 @@ with memray.Tracker("memray-bench_ssh2-python.bin"):
 
     temp_time = timeit.default_timer()
     with sftp_conn.open("/root/1kb.txt", sftp.LIBSSH2_FXF_READ, sftp.LIBSSH2_SFTP_S_IRUSR) as f:
-        read_data= b""
+        read_data = b""
         for _rc, data in f:
             read_data += data
     Path("small.txt").write_bytes(read_data)
@@ -77,7 +78,7 @@ with memray.Tracker("memray-bench_ssh2-python.bin"):
 
     temp_time = timeit.default_timer()
     with sftp_conn.open("/root/14kb.txt", sftp.LIBSSH2_FXF_READ, sftp.LIBSSH2_SFTP_S_IRUSR) as f:
-        read_data= b""
+        read_data = b""
         for _rc, data in f:
             read_data += data
     Path("medium.txt").write_bytes(read_data)
@@ -93,7 +94,7 @@ with memray.Tracker("memray-bench_ssh2-python.bin"):
 
     temp_time = timeit.default_timer()
     with sftp_conn.open("/root/64kb.txt", sftp.LIBSSH2_FXF_READ, sftp.LIBSSH2_SFTP_S_IRUSR) as f:
-        read_data= b""
+        read_data = b""
         for _rc, data in f:
             read_data += data
     Path("large.txt").write_bytes(read_data)
@@ -105,7 +106,7 @@ with memray.Tracker("memray-bench_ssh2-python.bin"):
 pprint(results_dict, sort_dicts=False)
 
 if Path("bench_results.json").exists():
-   results = json.loads(Path("bench_results.json").read_text())
+    results = json.loads(Path("bench_results.json").read_text())
 else:
     results = {}
 results.update({"ssh2-python": results_dict})

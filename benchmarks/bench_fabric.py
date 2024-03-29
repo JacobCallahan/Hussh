@@ -1,8 +1,9 @@
 import json
-import memray
-import timeit
-from pprint import pprint
 from pathlib import Path
+from pprint import pprint
+import timeit
+
+import memray
 
 results_dict = {}
 
@@ -71,7 +72,7 @@ with memray.Tracker("memray-bench_fabric.bin", native_traces=True, follow_fork=T
 pprint(results_dict, sort_dicts=False)
 
 if Path("bench_results.json").exists():
-   results = json.loads(Path("bench_results.json").read_text())
+    results = json.loads(Path("bench_results.json").read_text())
 else:
     results = {}
 results.update({"fabric": results_dict})

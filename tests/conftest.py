@@ -1,9 +1,9 @@
 """Common setup for Hussh tests."""
 
 import os
+from pathlib import PurePath
 import subprocess
 import time
-from pathlib import PurePath
 
 import docker
 import pexpect
@@ -74,9 +74,7 @@ def setup_agent_auth():
 
     # Start the ssh-agent and get the environment variables
     output = subprocess.check_output(["ssh-agent", "-s"])
-    env = dict(
-        line.split("=", 1) for line in output.decode().splitlines() if "=" in line
-    )
+    env = dict(line.split("=", 1) for line in output.decode().splitlines() if "=" in line)
 
     # Set the SSH_AUTH_SOCK and SSH_AGENT_PID environment variables
     os.environ["SSH_AUTH_SOCK"] = env["SSH_AUTH_SOCK"]
@@ -84,7 +82,9 @@ def setup_agent_auth():
 
     # Add the keys to the ssh-agent
     # subprocess.run(["ssh-add", str(base_key)], check=True)
-    result = subprocess.run(["ssh-add", str(base_key)], capture_output=True, text=True)
+    result = subprocess.run(
+        ["ssh-add", str(base_key)], capture_output=True, text=True, check=False
+    )
     print(result.stdout)
     print(result.stderr)
     # The auth_key is password protected

@@ -1,9 +1,10 @@
 """Tests for hussh.connection module."""
 
-import pytest
 from pathlib import Path
-from hussh import Connection, SSHResult
 
+import pytest
+
+from hussh import Connection, SSHResult
 
 TEXT_FILE = Path("tests/data/hp.txt").resolve()
 IMG_FILE = Path("tests/data/puppy.jpeg").resolve()
@@ -167,9 +168,10 @@ def test_remote_copy(conn, run_second_server):
 
 def test_tail(conn):
     """Test that we can tail a file."""
-    conn.scp_write_data("hello\nworld\n", "/root/hello.txt")
+    TEST_STR = "hello\nworld\n"
+    conn.scp_write_data(TEST_STR, "/root/hello.txt")
     with conn.tail("/root/hello.txt") as tf:
-        assert tf.read(0) == "hello\nworld\n"
-        assert tf.last_pos == 12
+        assert tf.read(0) == TEST_STR
+        assert tf.last_pos == len(TEST_STR)
         conn.execute("echo goodbye >> /root/hello.txt")
     assert tf.tailed_contents == "goodbye\n"
