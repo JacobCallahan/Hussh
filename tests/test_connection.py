@@ -149,6 +149,16 @@ def test_shell_context(conn):
     assert sh.exit_result.status != 0
 
 
+def test_pty_shell_context(conn):
+    """Test that we can run multiple commands in a pty shell context."""
+    with conn.shell(pty=True) as sh:
+        sh.send("echo test shell")
+        sh.send("bad command")
+    assert "test shell" in sh.exit_result.stdout
+    assert "command not found" in sh.exit_result.stdout
+    assert sh.exit_result.status != 0
+
+
 def test_connection_timeout():
     """Test that we can trigger a timeout on connect."""
     with pytest.raises(TimeoutError):
