@@ -503,6 +503,7 @@ impl Connection {
         channel.shell().unwrap();
         Ok(InteractiveShell {
             channel: ChannelWrapper { channel },
+            pty: pty.unwrap_or(false),
             exit_result: None,
         })
     }
@@ -518,6 +519,7 @@ pub struct ChannelWrapper {
 #[derive(Clone)]
 struct InteractiveShell {
     channel: ChannelWrapper,
+    pty: bool,
     #[pyo3(get)]
     exit_result: Option<SSHResult>,
 }
@@ -525,9 +527,10 @@ struct InteractiveShell {
 #[pymethods]
 impl InteractiveShell {
     #[new]
-    fn new(channel: ChannelWrapper) -> Self {
+    fn new(channel: ChannelWrapper, pty: bool) -> Self {
         InteractiveShell {
             channel,
+            pty,
             exit_result: None,
         }
     }
@@ -569,6 +572,9 @@ impl InteractiveShell {
         _exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
+        if self.pty {
+            self.send("exit\n".to_string(), Some(false)).unwrap();
+        }
         self.exit_result = Some(self.read());
         Ok(())
     }
