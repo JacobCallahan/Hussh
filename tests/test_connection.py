@@ -184,4 +184,4 @@ def test_tail(conn):
         assert tf.read(0) == TEST_STR
         assert tf.last_pos == len(TEST_STR)
         conn.execute("echo goodbye >> /root/hello.txt")
-    assert tf.tailed_contents == "goodbye\n"
+    assert tf.contents == "goodbye\n"

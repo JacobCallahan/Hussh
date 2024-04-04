@@ -137,7 +137,7 @@ with conn.tail("/path/to/file.txt") as tf:
    # perform some actions or wait
    print(tf.read())  # at any time, you can read any unread contents
    # when you're done tailing, exit the context manager
-print(tf.tailed_contents)
+print(tf.contents)
 ```
 
 # Interactive Shell

@@ -471,7 +471,7 @@ impl Connection {
     ///     time.sleep(5)  # wait or perform other operations
     ///     print(tailer.read())
     ///     time.sleep(5)  # wait or perform other operations
-    /// print(tailer.tailed_contents)
+    /// print(tailer.contents)
     /// ```
     fn tail(&self, remote_file: String) -> FileTailer {
         FileTailer::new(self, remote_file, None)
@@ -591,7 +591,7 @@ impl InteractiveShell {
 /// * `remote_file`: A string representing the path to the remote file.
 /// * `init_pos`: An optional initial position from where to start reading the file.
 /// * `last_pos`: The last position read from the file.
-/// * `tailed_contents`: The contents read from the file.
+/// * `contents`: The contents read from the file.
 ///
 /// # Methods
 ///
@@ -609,7 +609,7 @@ struct FileTailer {
     #[pyo3(get)]
     last_pos: u64,
     #[pyo3(get)]
-    tailed_contents: Option<String>,
+    contents: Option<String>,
 }
 
 #[pymethods]
@@ -621,7 +621,7 @@ impl FileTailer {
             remote_file,
             init_pos,
             last_pos: 0,
-            tailed_contents: None,
+            contents: None,
         }
     }
 
@@ -664,7 +664,7 @@ impl FileTailer {
         _exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        self.tailed_contents = Some(self.read(self.init_pos));
+        self.contents = Some(self.read(self.init_pos));
         Ok(())
     }
 }
