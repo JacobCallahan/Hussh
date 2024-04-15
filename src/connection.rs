@@ -41,7 +41,7 @@
 //! If you don't pass a username, "root" is used.
 //!
 //! To use the interactive shell, it is recommended to use the shell() context manager from the Connection class.
-//! You can send commands to the shell using the `send` method, then get the results from exit_result when you exit the context manager.
+//! You can send commands to the shell using the `send` method, then get the results from result when you exit the context manager.
 //! Due to the nature of reading from the shell, do not use the `read` method if you want to send more commands.
 //!
 //! ```python
@@ -50,7 +50,7 @@
 //!    shell.send("pwd")
 //!    shell.send("whoami")
 //!
-//! print(shell.exit_result.stdout)
+//! print(shell.result.stdout)
 //! ```
 //!
 //! Note: The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
@@ -491,7 +491,7 @@ impl Connection {
     /// with conn.shell() as shell:
     ///     shell.send("ls")
     ///     shell.send("pwd")
-    /// print(shell.exit_result.stdout)
+    /// print(shell.result.stdout)
     /// ```
     fn shell(&self, pty: Option<bool>) -> PyResult<InteractiveShell> {
         let mut channel = self.session.channel_session().unwrap();
@@ -504,7 +504,7 @@ impl Connection {
         Ok(InteractiveShell {
             channel: ChannelWrapper { channel },
             pty: pty.unwrap_or(false),
-            exit_result: None,
+            result: None,
         })
     }
 }
@@ -521,7 +521,7 @@ struct InteractiveShell {
     channel: ChannelWrapper,
     pty: bool,
     #[pyo3(get)]
-    exit_result: Option<SSHResult>,
+    result: Option<SSHResult>,
 }
 
 #[pymethods]
@@ -531,7 +531,7 @@ impl InteractiveShell {
         InteractiveShell {
             channel,
             pty,
-            exit_result: None,
+            result: None,
         }
     }
 
@@ -575,7 +575,7 @@ impl InteractiveShell {
         if self.pty {
             self.send("exit\n".to_string(), Some(false)).unwrap();
         }
-        self.exit_result = Some(self.read());
+        self.result = Some(self.read());
         Ok(())
     }
 }

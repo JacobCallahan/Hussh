@@ -143,7 +143,7 @@ print(tf.contents)
 # Interactive Shell
 If you need to keep a shell open to perform more complex interactions, you can get an `InteractiveShell` instance from the `Connection` class instance.
 To use the interactive shell, it is recommended to use the `shell()` context manager from the `Connection` class.
-You can send commands to the shell using the `send` method, then get the results from `exit_result` when you exit the context manager.
+You can send commands to the shell using the `send` method, then get the results from `result` when you exit the context manager.
 
 ```python
 with conn.shell() as shell:
@@ -151,7 +151,7 @@ with conn.shell() as shell:
    shell.send("pwd")
    shell.send("whoami")
 
-print(shell.exit_result.stdout)
+print(shell.result.stdout)
 ```
 **Note:** The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
 
