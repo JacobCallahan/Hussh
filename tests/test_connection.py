@@ -144,9 +144,9 @@ def test_shell_context(conn):
     with conn.shell() as sh:
         sh.send("echo test shell")
         sh.send("bad command")
-    assert "test shell" in sh.exit_result.stdout
-    assert "command not found" in sh.exit_result.stderr
-    assert sh.exit_result.status != 0
+    assert "test shell" in sh.result.stdout
+    assert "command not found" in sh.result.stderr
+    assert sh.result.status != 0
 
 
 def test_pty_shell_context(conn):
@@ -154,9 +154,9 @@ def test_pty_shell_context(conn):
     with conn.shell(pty=True) as sh:
         sh.send("echo test shell")
         sh.send("bad command")
-    assert "test shell" in sh.exit_result.stdout
-    assert "command not found" in sh.exit_result.stdout
-    assert sh.exit_result.status != 0
+    assert "test shell" in sh.result.stdout
+    assert "command not found" in sh.result.stdout
+    assert sh.result.status != 0
 
 
 def test_connection_timeout():
