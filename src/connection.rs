@@ -226,15 +226,13 @@ impl Connection {
 #[pymethods]
 impl Connection {
     #[new]
-    #[pyo3(
-        text_signature = "(host, /, port=22, username='root', password=None, private_key=None, timeout=0)"
-    )]
+    #[pyo3(signature = (host, port=22, username="root", password=None, private_key=None, timeout=0))]
     fn new(
-        host: String,
+        host: &str,
         port: Option<i32>,
-        username: Option<String>,
-        password: Option<String>,
-        private_key: Option<String>,
+        username: Option<&str>,
+        password: Option<&str>,
+        private_key: Option<&str>,
         timeout: Option<u32>,
     ) -> PyResult<Connection> {
         // if port isn't set, use the default ssh port 22
@@ -252,29 +250,29 @@ impl Connection {
             .handshake()
             .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
         // if username isn't set, try using root
-        let username = username.unwrap_or("root".to_string());
-        let password = password.unwrap_or("".to_string());
-        let private_key = private_key.unwrap_or("".to_string());
+        let username = username.unwrap_or("root");
+        let password = password.unwrap_or("");
+        let private_key = private_key.unwrap_or("");
         // if private_key is set, use it to authenticate
         if !private_key.is_empty() {
             // if a password is set, use it to decrypt the private key
             if !password.is_empty() {
                 session
-                    .userauth_pubkey_file(&username, None, Path::new(&private_key), Some(&password))
+                    .userauth_pubkey_file(username, None, Path::new(private_key), Some(password))
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
             } else {
                 // otherwise, try using the private key without a passphrase
                 session
-                    .userauth_pubkey_file(&username, None, Path::new(&private_key), None)
+                    .userauth_pubkey_file(username, None, Path::new(private_key), None)
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
             }
         } else if !password.is_empty() {
             session
-                .userauth_password(&username, &password)
+                .userauth_password(username, password)
                 .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
         } else {
             // if password isn't set, try using the default ssh-agent
-            if session.userauth_agent(&username).is_err() {
+            if session.userauth_agent(username).is_err() {
                 return Err(PyErr::new::<AuthenticationError, _>(
                     "Failed to authenticate with ssh-agent",
                 ));
@@ -283,10 +281,10 @@ impl Connection {
         Ok(Connection {
             session,
             port,
-            host,
-            username,
-            password,
-            private_key,
+            host: host.to_string(),
+            username: username.to_string(),
+            password: password.to_string(),
+            private_key: private_key.to_string(),
             timeout,
             sftp_conn: None,
         })
@@ -304,6 +302,7 @@ impl Connection {
     /// Reads a file over SCP and returns the contents.
     /// If `local_path` is provided, the file is saved to the local system.
     /// Otherwise, the contents of the file are returned as a string.
+    #[pyo3(signature = (remote_path, local_path=None))]
     fn scp_read(&self, remote_path: String, local_path: Option<String>) -> PyResult<String> {
         let (mut remote_file, stat) = self.session.scp_recv(Path::new(&remote_path)).unwrap();
         match local_path {
@@ -384,6 +383,7 @@ impl Connection {
     /// Reads a file over SFTP and returns the contents.
     /// If `local_path` is provided, the file is saved to the local system.
     /// Otherwise, the contents of the file are returned as a string.
+    #[pyo3(signature = (remote_path, local_path=None))]
     fn sftp_read(&mut self, remote_path: String, local_path: Option<String>) -> PyResult<String> {
         let mut remote_file = BufReader::new(self.sftp().open(Path::new(&remote_path)).unwrap());
         match local_path {
@@ -411,6 +411,7 @@ impl Connection {
 
     /// Writes a file over SFTP.
     /// If `remote_path` is not provided, the local file is written to the same path on the remote system.
+    #[pyo3(signature = (local_path, remote_path=None))]
     fn sftp_write(&mut self, local_path: String, remote_path: Option<String>) -> PyResult<()> {
         let mut local_file = std::fs::File::open(&local_path).unwrap();
         let remote_path = remote_path.unwrap_or_else(|| local_path.clone());
@@ -438,6 +439,7 @@ impl Connection {
     }
 
     // Copy a file from this connection to another connection
+    #[pyo3(signature = (source_path, dest_conn, dest_path=None))]
     fn remote_copy(
         &self,
         source_path: String,
@@ -493,6 +495,7 @@ impl Connection {
     ///     shell.send("pwd")
     /// print(shell.result.stdout)
     /// ```
+    #[pyo3(signature = (pty=None))]
     fn shell(&self, pty: Option<bool>) -> PyResult<InteractiveShell> {
         let mut channel = self.session.channel_session().unwrap();
         if let Some(pty) = pty {
@@ -517,7 +520,7 @@ pub struct ChannelWrapper {
 
 #[pyclass]
 #[derive(Clone)]
-struct InteractiveShell {
+pub struct InteractiveShell {
     channel: ChannelWrapper,
     pty: bool,
     #[pyo3(get)]
@@ -545,6 +548,7 @@ impl InteractiveShell {
 
     /// Sends a command to the shell.
     /// If you don't want to add a newline at the end of the command, set `add_newline` to `false`.
+    #[pyo3(signature = (data, add_newline=None))]
     fn send(&mut self, data: String, add_newline: Option<bool>) -> PyResult<()> {
         let add_newline = add_newline.unwrap_or(true);
         let data = if add_newline && !data.ends_with('\n') {
@@ -566,6 +570,7 @@ impl InteractiveShell {
         slf
     }
 
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __exit__(
         &mut self,
         _exc_type: Option<&Bound<'_, PyAny>>,
@@ -601,7 +606,7 @@ impl InteractiveShell {
 /// * `__enter__`: Prepares the `FileTailer` for use in a `with` statement.
 /// * `__exit__`: Cleans up after the `FileTailer` is used in a `with` statement.
 #[pyclass]
-struct FileTailer {
+pub struct FileTailer {
     sftp_conn: ssh2::Sftp,
     #[pyo3(get)]
     remote_file: String,
@@ -615,6 +620,7 @@ struct FileTailer {
 #[pymethods]
 impl FileTailer {
     #[new]
+    #[pyo3(signature = (conn, remote_file, init_pos=None))]
     fn new(conn: &Connection, remote_file: String, init_pos: Option<u64>) -> FileTailer {
         FileTailer {
             sftp_conn: conn.session.sftp().unwrap(),
@@ -640,6 +646,7 @@ impl FileTailer {
     }
 
     // Read the contents of the remote file from a given position
+    #[pyo3(signature = (from_pos=None))]
     fn read(&mut self, from_pos: Option<u64>) -> String {
         let from_pos = from_pos.unwrap_or(self.last_pos);
         let mut remote_file =
@@ -658,6 +665,7 @@ impl FileTailer {
         Ok(slf)
     }
 
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __exit__(
         &mut self,
         _exc_type: Option<&Bound<'_, PyAny>>,
