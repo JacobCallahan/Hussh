@@ -48,7 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64, aarch64, armv7, s390x, ppc64le]
+        # s390x currently has issues with gcc
+        target: [x86_64, aarch64, armv7, ppc64le]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
