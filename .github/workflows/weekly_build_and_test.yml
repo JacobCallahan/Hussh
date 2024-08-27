@@ -1,0 +1,160 @@
+name: Unreleased Python Build and Test
+
+on:
+  schedule:
+    - cron: '0 0 * * 3'
+
+permissions:
+  contents: read
+
+jobs:
+  code_checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13-dev'
+      - name: Run pre-commit checks
+        run: |
+          pip install pre-commit
+          pre-commit run --all-files
+
+  sdist:
+    needs: [code_checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  linux:
+    needs: [code_checks]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64, armv7, ppc64le, s390x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13-dev'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          PKG_CONFIG_PATH: "/usr/share/miniconda/lib/pkgconfig/"
+          OPENSSL_NO_VENDOR: 1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          # sccache: 'true'  # Disabled due to issues with sccache on linux
+          manylinux: auto
+          before-script-linux: |
+            # If we're running on rhel centos, install needed packages. thx s3rius!
+            if command -v yum &> /dev/null; then
+                yum update -y && yum install -y gcc perl-core openssl openssl-devel pkgconfig libatomic
+            else
+                # If we're running on debian-based system.
+                apt update -y && apt-get install -y libssl-dev openssl pkg-config
+            fi
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+      - name: Install and Test
+        shell: bash
+        run: |
+          set -e
+          pip install .[dev] --find-links dist --force-reinstall
+          pytest -v tests/
+
+  windows:
+    needs: [code_checks]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13-dev'
+          architecture: ${{ matrix.target }}
+      - name: Set Perl environment variables
+        run: |
+          echo "PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "OPENSSL_SRC_PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Remove wincred from docker config 
+        run: sed -i '/wincred/d' ~/.docker/config.json
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
+      - name: Install
+        shell: bash
+        run: pip install .[dev] --find-links dist --force-reinstall
+      # Disabled on windows due to issues with docker
+      # BuildError: no matching manifest for windows/amd64 ... in the manifest list entries
+      # - name: Test
+      #   if: ${{ !startsWith(matrix.target, 'x86') }}
+      #   shell: bash
+      #   run: pytest -v tests/
+
+  macos:
+    needs: [code_checks]
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    env:
+      OPENSSL_NO_VENDOR: 1
+      DOCKER_HOST: unix:///var/run/docker.sock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13-dev'
+      - name: Set OPENSSL_DIR
+        run: echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+      # - name: setup-docker
+      #   run: |
+      #     brew install docker
+      #     open --background -a Docker
+      #     while ! docker info &> /dev/null; do sleep 1; done
+      - name: Install
+        shell: bash
+        run: pip install .[dev] --find-links dist --force-reinstall
+      # Disabled on macos due to issues with docker
+      # - name: Test
+      #   shell: bash
+      #   run: pytest -v tests/
