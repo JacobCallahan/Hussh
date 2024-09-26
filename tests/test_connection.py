@@ -159,10 +159,16 @@ def test_pty_shell_context(conn):
     assert sh.result.status != 0
 
 
-def test_connection_timeout():
-    """Test that we can trigger a timeout on connect."""
+def test_session_timeout():
+    """Test that we can trigger a timeout on session handshake."""
     with pytest.raises(TimeoutError):
         Connection(host="localhost", port=8022, password="toor", timeout=10)
+
+
+def test_command_timeout(conn):
+    """Test that we can trigger a timeout on command execution."""
+    with pytest.raises(TimeoutError):
+        conn.execute("sleep 5", timeout=3000)
 
 
 def test_remote_copy(conn, run_second_server):

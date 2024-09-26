@@ -69,18 +69,28 @@ create_exception!(
     pyo3::exceptions::PyException
 );
 
-fn read_from_channel(channel: &mut Channel) -> SSHResult {
+fn read_from_channel(channel: &mut Channel) -> Result<SSHResult, PyErr> {
+    // TODO: handle errors better instead of just raising a PyTimeoutError
     let mut stdout = String::new();
-    channel.read_to_string(&mut stdout).unwrap();
+    channel
+        .read_to_string(&mut stdout)
+        .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("Timeout reading stdout: {}", e)))?;
     let mut stderr = String::new();
-    channel.stderr().read_to_string(&mut stderr).unwrap();
-    channel.wait_close().unwrap();
-    let status = channel.exit_status().unwrap();
-    SSHResult {
+    channel
+        .stderr()
+        .read_to_string(&mut stderr)
+        .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("Timeout reading stderr: {}", e)))?;
+    channel.wait_close().map_err(|e| {
+        PyErr::new::<PyTimeoutError, _>(format!("Timeout waiting for channel to close: {}", e))
+    })?;
+    let status = channel.exit_status().map_err(|e| {
+        PyErr::new::<PyTimeoutError, _>(format!("Timeout getting exit status: {}", e))
+    })?;
+    Ok(SSHResult {
         stdout,
         stderr,
         status,
-    }
+    })
 }
 
 #[pyclass]
@@ -125,18 +135,9 @@ impl SSHResult {
 /// * `username`: The username to use for authentication.
 /// * `password`: The password to use for authentication.
 /// * `private_key`: The path to the private key to use for authentication.
+/// * `timeout`: The timeout(ms) for the SSH session.
 ///
 /// ## Methods
-///
-/// ### `new`
-///
-/// Creates a new `Connection` instance. It takes the following parameters:
-///
-/// * `host`: The host to connect to.
-/// * `port`: The port to connect to. If not provided, the default SSH port (22) is used.
-/// * `username`: The username to use for authentication. If not provided, "root" is used.
-/// * `password`: The password to use for authentication. If not provided, an empty string is used.
-/// * `private_key`: The path to the private key to use for authentication. If not provided, an empty string is used.
 ///
 /// ### `execute`
 ///
@@ -190,10 +191,6 @@ impl SSHResult {
 /// * `source_path`: The path to the file on the remote system.
 /// * `dest_conn`: The destination connection to copy the file to.
 /// * `dest_path`: The path to save the file on the destination system. If not provided, the source path is used.
-///
-/// ### `__repr__`
-///
-/// Returns a string representation of the `Connection` instance.
 #[pyclass]
 pub struct Connection {
     session: Session,
@@ -291,12 +288,31 @@ impl Connection {
     }
 
     /// Executes a command over the SSH connection and returns the result.
-    fn execute(&self, command: String) -> PyResult<SSHResult> {
-        let mut channel = self.session.channel_session().unwrap();
-        if let Err(e) = channel.exec(&command) {
-            return Err(PyErr::new::<PyTimeoutError, _>(format!("{}", e)));
+    /// If `timeout` is provided, it temporarily updates the session timeout for the duration of the command execution.
+    #[pyo3(signature = (command, timeout=None))]
+    fn execute(&self, command: String, timeout: Option<u32>) -> PyResult<SSHResult> {
+        let original_timeout = self.session.timeout();
+        if let Some(t) = timeout {
+            self.session.set_timeout(t);
         }
-        Ok(read_from_channel(&mut channel))
+
+        let mut channel = self.session.channel_session().map_err(|e| {
+            PyErr::new::<PyTimeoutError, _>(format!(
+                "Timed out establishing channel session.\n{}",
+                e
+            ))
+        })?;
+        // exec is non-blocking, so we don't check for a timeout here, but in read_from_channel
+        channel.exec(&command).unwrap();
+        let result = match read_from_channel(&mut channel) {
+            Ok(res) => res,
+            Err(e) => {
+                self.session.set_timeout(original_timeout);
+                return Err(e);
+            }
+        };
+        self.session.set_timeout(original_timeout);
+        Ok(result)
     }
 
     /// Reads a file over SCP and returns the contents.
@@ -540,10 +556,17 @@ impl InteractiveShell {
 
     /// Reads the output from the shell and returns an `SSHResult`.
     /// Note: This sends an EOF to the shell, so you won't be able to send more commands after calling `read`.
-    fn read(&mut self) -> SSHResult {
+    fn read(&mut self) -> PyResult<SSHResult> {
         self.channel.channel.flush().unwrap();
         self.channel.channel.send_eof().unwrap();
-        read_from_channel(&mut self.channel.channel)
+        match read_from_channel(&mut self.channel.channel) {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                self.channel.channel.close().unwrap();
+                self.result = None;
+                Err(e)
+            }
+        }
     }
 
     /// Sends a command to the shell.
@@ -580,7 +603,7 @@ impl InteractiveShell {
         if self.pty {
             self.send("exit\n".to_string(), Some(false)).unwrap();
         }
-        self.result = Some(self.read());
+        self.result = Some(self.read()?);
         Ok(())
     }
 }
