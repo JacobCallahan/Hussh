@@ -57,6 +57,14 @@ def test_bad_command(conn):
     assert "command not found" in result.stderr
 
 
+def test_conn_context():
+    """Test that the Connection class' context manager works."""
+    with Connection(host="localhost", port=8022, password="toor") as conn:
+        result = conn.execute("echo hello")
+    assert result.status == 0
+    assert result.stdout == "hello\n"
+
+
 def test_text_scp(conn):
     """Test that we can copy a file to the server and read it back."""
     # copy a local file to the server

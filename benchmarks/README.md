@@ -25,6 +25,6 @@ This will ultimately collect all the benchmark and memray information into a tab
 
 Alternatively, if you'd prefer to run individual benchmarks, you can do that.
 ```bash
-python test_hussh.py
+python bench_hussh.py
 ```
 This will also create a memray output file for each script ran.
