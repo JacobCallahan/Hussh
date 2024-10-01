@@ -70,6 +70,21 @@ Hussh can also do agent-based authentication, if you've already established it.
 conn = Connection("my.test.server")
 ```
 
+## Cleaning up after yourself
+
+Hussh will clean up after itself automatically when the `Connection` object is garbage collected.
+
+However, if you want to more explicitly clean up after yourself, you can `close` the connection.
+```python
+conn.close()
+```
+or you can use the `Connection` class' context manager, which will `close` when you exit the context.
+```python
+with Connection(host="my.test.server", password="pass") as conn:
+   result = conn.execute("ls")
+assert result.status == 0
+```
+
 # Executing commands
 The most basic foundation of ssh libraries is the ability to execute commands against the remote host.
 For Hussh, just use the `Connection` object's `execute` method.
@@ -82,7 +97,7 @@ Each execute returns an `SSHResult` object with command's stdout, stderr, and st
 # SFTP
 If you need to transfer files to/from the remote host, SFTP may be your best bet.
 
-## Writing Files and Data
+## Writing files and data
 ```python
 # write a local file to the remote destination
 conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
@@ -91,7 +106,7 @@ conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
 conn.sftp_write_data(data="Hello there!", remote_path="/dest/path/file")
 ```
 
-## Reading Files
+## Reading files
 ```python
 # You can copy a remote file to a local destination
 conn.sftp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
@@ -113,7 +128,7 @@ By default, if you don't pass in an alternate `dest_path`, Hussh will copy it to
 # SCP
 For remote servers that support SCP, Hussh can do that to.
 
-## Writing Files and Data
+## Writing files and data
 ```python
 # write a local file to the remote destination
 conn.scp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
@@ -122,7 +137,7 @@ conn.scp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
 conn.scp_write_data(data="Hello there!", remote_path="/dest/path/file")
 ```
 
-## Reading Files
+## Reading files
 ```python
 # You can copy a remote file to a local destination
 conn.scp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
@@ -157,7 +172,7 @@ print(shell.result.stdout)
 
 # Disclaimer
 This is a VERY early project that should not be used in production code!
-There isn't even proper exception handling, so try/except won't work.
+There isn't even proper exception handling, so expect some Rust panics to fall through.
 With that said, try it out and let me know your thoughts!
 
 # Future Features

@@ -495,6 +495,32 @@ impl Connection {
         FileTailer::new(self, remote_file, None)
     }
 
+    /// Close the connection's session
+    fn close(&self) -> PyResult<()> {
+        self.session
+            .disconnect(None, "Bye from Hussh", None)
+            .unwrap();
+        Ok(())
+    }
+
+    /// Provide an enter for the context manager
+    fn __enter__(slf: PyRef<Self>) -> PyRef<Self> {
+        slf
+    }
+
+    /// Provide an exit for the context manager
+    /// This will close the session
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_value: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let _ = self.close();
+        Ok(())
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
             "Connection(host={}, port={}, username={}, password=*****)",
