@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@main
         with:
           command: sdist
           args: --out dist
@@ -72,7 +72,7 @@ jobs:
           check-latest: true
           allow-prereleases: true
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@main
         env:
           PKG_CONFIG_PATH: "/usr/share/miniconda/lib/pkgconfig/"
           OPENSSL_NO_VENDOR: 1
@@ -129,7 +129,7 @@ jobs:
           check-latest: true
           allow-prereleases: true
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@main
         env:
           PKG_CONFIG_PATH: "/usr/share/miniconda/lib/pkgconfig/"
         with:
@@ -182,7 +182,7 @@ jobs:
           allow-prereleases: true
           architecture: ${{ matrix.platform.target }}
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@main
         env:
           OPENSSL_DIR: C:\Program Files\OpenSSL-Win64
           OPENSSL_STATIC: 1
@@ -218,7 +218,7 @@ jobs:
       - name: Set OPENSSL_DIR
         run: echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@main
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter
