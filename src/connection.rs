@@ -252,15 +252,18 @@ impl Connection {
         let private_key = private_key.unwrap_or("");
         // if private_key is set, use it to authenticate
         if !private_key.is_empty() {
+            // If a user uses a tilde to represent the home directory,
+            // replace it with the actual home directory
+            let private_key = shellexpand::tilde(private_key).into_owned();
             // if a password is set, use it to decrypt the private key
             if !password.is_empty() {
                 session
-                    .userauth_pubkey_file(username, None, Path::new(private_key), Some(password))
+                    .userauth_pubkey_file(username, None, Path::new(&private_key), Some(password))
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
             } else {
                 // otherwise, try using the private key without a passphrase
                 session
-                    .userauth_pubkey_file(username, None, Path::new(private_key), None)
+                    .userauth_pubkey_file(username, None, Path::new(&private_key), None)
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
             }
         } else if !password.is_empty() {
