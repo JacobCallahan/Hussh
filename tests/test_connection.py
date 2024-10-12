@@ -26,6 +26,19 @@ def test_key_auth():
     assert Connection(host="localhost", port=8022, private_key="tests/data/test_key")
 
 
+def test_key_in_user_home():
+    """Test that we can establish a connection with a key in the user's home directory."""
+    # temporarily copy the key to the user's home directory
+    key_path = Path("tests/data/test_key")
+    new_path = Path.home() / ".ssh" / "test_key"
+    new_path.parent.mkdir(exist_ok=True)
+    key_path.rename(new_path)
+    try:
+        assert Connection(host="localhost", port=8022, private_key="~/.ssh/test_key")
+    finally:
+        new_path.rename(key_path)
+
+
 def test_key_with_password_auth():
     """Test that we can establish a connection with key-based authentication and a password."""
     assert Connection(
