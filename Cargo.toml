@@ -9,9 +9,9 @@ name = "hussh"
 crate-type = ["cdylib"]
 
 [dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
-pyo3 = "0.22"
-shellexpand = "2.1"
+openssl = { version = "0.10.68", features = ["vendored"] }
+pyo3 = "0.23.1"
+shellexpand = "3.1.0"
 # ssh2 = "0.9"
 # temporary until ssh2#312 makes it into a release. probably 0.9.5
 ssh2 = { git = "https://github.com/alexcrichton/ssh2-rs", branch = "master" }

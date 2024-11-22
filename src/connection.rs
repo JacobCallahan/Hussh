@@ -117,7 +117,7 @@ impl SSHResult {
     // The __str__ method for the SSHResult class
     fn __str__(&self) -> PyResult<String> {
         Ok(format!(
-            "stdout:\n{}stderr:\n{}status: {}",
+            "stdout:\n{}\nstderr:\n{}\nstatus: {}",
             self.stdout, self.stderr, self.status
         ))
     }
