@@ -180,6 +180,14 @@ def test_pty_shell_context(conn):
     assert sh.result.status != 0
 
 
+@pytest.mark.skip("not yet implemented")
+def test_hangup_shell_context(conn):
+    """Test that we can hang up a running shell while a previous command is still running."""
+    with conn.shell() as sh:
+        sh.send("tail -f /dev/random")
+    assert sh.result.stdout
+
+
 def test_session_timeout():
     """Test that we can trigger a timeout on session handshake."""
     with pytest.raises(TimeoutError):
