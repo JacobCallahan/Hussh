@@ -6,7 +6,8 @@ It is also a good idea to run benchmarks a few times and run an average.
 
 ## Install benchmarking requirements
 First, you will either need to have your own test target, putting that information in the `target.json` file in this directory.
-Alternatively, you can install Docker or Podman, then build the hussh-test-server image in the `tests/setup/` directory of this repo.
+If you want to use the test server container, pull it from `ghcr.io/jacobcallahan/hussh/hussh-test-server:latest`
+Alternatively, you can build the hussh-test-server image in the `tests/setup/` directory of this repo.
 Then you can start the test server with this command
 ```bash
 docker run --rm -d -p 8022:22 hussh-test-server

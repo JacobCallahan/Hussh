@@ -10,6 +10,7 @@ import pexpect
 import pytest
 
 TESTDIR = PurePath(__file__).parent
+TEST_SERVER_IMAGE = "ghcr.io/jacobcallahan/hussh/hussh-test-server:latest"
 
 
 @pytest.fixture(scope="session")
@@ -17,12 +18,9 @@ def ensure_test_server_image():
     """Ensure that the test server Docker image is available."""
     client = docker.from_env()
     try:
-        client.images.get("hussh-test-server")
+        client.images.get(TEST_SERVER_IMAGE)
     except docker.errors.ImageNotFound:
-        client.images.build(
-            path=str(TESTDIR / "setup"),
-            tag="hussh-test-server",
-        )
+        client.images.pull(TEST_SERVER_IMAGE)
     client.close()
 
 
@@ -34,7 +32,7 @@ def run_test_server(ensure_test_server_image):
         container = client.containers.get("hussh-test-server")
     except docker.errors.NotFound:  # if not, start it
         container = client.containers.run(
-            "hussh-test-server",
+            TEST_SERVER_IMAGE,
             detach=True,
             ports={"22/tcp": 8022},
             name="hussh-test-server",
@@ -54,7 +52,7 @@ def run_second_server(ensure_test_server_image):
         container = client.containers.get("hussh-test-server2")
     except docker.errors.NotFound:  # if not, start it
         container = client.containers.run(
-            "hussh-test-server",
+            TEST_SERVER_IMAGE,
             detach=True,
             ports={"22/tcp": 8023},
             name="hussh-test-server2",
