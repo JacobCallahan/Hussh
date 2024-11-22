@@ -1,0 +1,38 @@
+name: Update Hussh Test Server GHCR Image
+
+on:
+  push:
+    paths:
+      - 'tests/setup/**'
+  pull_request:
+    paths:
+      - 'tests/setup/**'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    # Login to GitHub Container Registry only on push events
+    - name: Login to GitHub Container Registry
+      if: github.event_name == 'push'
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: jacobcallahan
+        password: ${{ secrets.GHCR_TOKEN }}
+
+    # Build and push Docker image
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        # Conditionally push based on the event type
+        push: ${{ github.event_name == 'push' }}
+        tags: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
