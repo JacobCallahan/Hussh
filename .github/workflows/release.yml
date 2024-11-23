@@ -72,7 +72,7 @@ jobs:
           OPENSSL_NO_VENDOR: 1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 pypy3.8 pypy3.9 pypy3.10
           # sccache: 'true'
           manylinux: auto
           before-script-linux: |
@@ -121,7 +121,7 @@ jobs:
           PKG_CONFIG_PATH: "/usr/share/miniconda/lib/pkgconfig/"
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 pypy3.8 pypy3.9 pypy3.10
           # sccache: 'true'
           manylinux: musllinux_1_2
           before-script-linux: |
@@ -167,7 +167,7 @@ jobs:
           OPENSSL_DIR: C:\Program Files\OpenSSL-Win64
           OPENSSL_STATIC: 1
         with:
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -200,7 +200,7 @@ jobs:
         uses: PyO3/maturin-action@main
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 pypy3.8 pypy3.9 pypy3.10
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
