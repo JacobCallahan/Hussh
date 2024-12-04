@@ -62,6 +62,13 @@ jobs:
           #   target: s390x
           - runner: ubuntu-latest
             target: ppc64le
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -117,6 +124,13 @@ jobs:
             target: aarch64
           - runner: ubuntu-latest
             target: armv7
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

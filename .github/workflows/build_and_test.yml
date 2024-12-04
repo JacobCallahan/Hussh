@@ -64,6 +64,17 @@ jobs:
           #   target: s390x
           - runner: ubuntu-latest
             target: ppc64le
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --health-cmd "ps aux | grep sshd"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -94,6 +105,10 @@ jobs:
             if [ "${{ matrix.platform.target }}" = "x86" ]; then
                 ln -s /usr/lib/libatomic.so.1 /usr/lib/libatomic.so
             fi
+      - name: Print hussh-test-server container info
+        run: |
+          docker ps -a --filter "name=hussh-test-server"
+          docker logs hussh-test-server
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -120,6 +135,17 @@ jobs:
             target: aarch64
           - runner: ubuntu-latest
             target: armv7
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --health-cmd "ps aux | grep sshd"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -144,6 +170,10 @@ jobs:
                 # If we're running on debian-based system.
                 apt update -y && apt-get install -y libssl-dev openssl pkg-config libatomic1
             fi
+      - name: Print hussh-test-server container info
+        run: |
+          docker ps -a --filter "name=hussh-test-server"
+          docker logs hussh-test-server
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
