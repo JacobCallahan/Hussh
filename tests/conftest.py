@@ -30,6 +30,9 @@ def run_test_server(ensure_test_server_image):
     client = docker.from_env()
     try:  # check to see if the container is already running
         container = client.containers.get("hussh-test-server")
+        if container.status != "running":
+            container.start()
+            time.sleep(5)  # give the server time to start
         managed = False
     except docker.errors.NotFound:  # if not, start it
         container = client.containers.run(
