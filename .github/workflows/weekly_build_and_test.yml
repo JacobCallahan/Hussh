@@ -62,6 +62,13 @@ jobs:
           #   target: s390x
           - runner: ubuntu-latest
             target: ppc64le
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -76,6 +83,7 @@ jobs:
           OPENSSL_NO_VENDOR: 1
         with:
           target: ${{ matrix.platform.target }}
+          # args: --release --out dist --find-interpreter  <-- TODO: Add this back when maturin supports it
           args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 pypy3.9 pypy3.10
           # sccache: 'true'
           manylinux: auto
@@ -117,6 +125,13 @@ jobs:
             target: aarch64
           - runner: ubuntu-latest
             target: armv7
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -197,9 +212,11 @@ jobs:
     strategy:
       matrix:
         platform:
-          - runner: macos-12
+          - runner: macos-13
             target: x86_64
           - runner: macos-14
+            target: aarch64
+          - runner: macos-15
             target: aarch64
     steps:
       - uses: actions/checkout@v4

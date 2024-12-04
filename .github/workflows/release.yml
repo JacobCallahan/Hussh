@@ -24,6 +24,7 @@ jobs:
           pre-commit run --all-files
 
   sdist:
+    needs: [code_checks]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +40,7 @@ jobs:
           path: dist
 
   linux:
+    needs: [code_checks]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -56,6 +58,13 @@ jobs:
           #   target: s390x
           - runner: ubuntu-latest
             target: ppc64le
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -70,6 +79,7 @@ jobs:
           OPENSSL_NO_VENDOR: 1
         with:
           target: ${{ matrix.platform.target }}
+          # args: --release --out dist --find-interpreter  <-- TODO: Add this back when maturin supports it
           args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 pypy3.9 pypy3.10
           # sccache: 'true'
           manylinux: auto
@@ -90,8 +100,15 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.platform.target }}
           path: dist
+      - name: Install and Test
+        shell: bash
+        run: |
+          set -e
+          pip install .[dev] --find-links dist --force-reinstall
+          pytest -v tests/
 
   musllinux:
+    needs: [code_checks]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -104,6 +121,13 @@ jobs:
             target: aarch64
           - runner: ubuntu-latest
             target: armv7
+    services:
+      hussh-test-server:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server
+        ports:
+          - 8022:22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -133,8 +157,15 @@ jobs:
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
           path: dist
+      - name: Install and Test
+        shell: bash
+        run: |
+          set -e
+          pip install .[dev] --find-links dist --force-reinstall
+          pytest -v tests/
 
   windows:
+    needs: [code_checks]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -172,11 +203,12 @@ jobs:
           path: dist
 
   macos:
+    needs: [code_checks]
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
         platform:
-          - runner: macos-12
+          - runner: macos-13
             target: x86_64
           - runner: macos-14
             target: aarch64

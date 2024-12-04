@@ -32,7 +32,7 @@ jobs:
     - name: Build and push Docker image
       uses: docker/build-push-action@v6
       with:
-        context: .
-        # Conditionally push based on the event type
-        push: ${{ github.event_name == 'push' }}
-        tags: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+          context: ./tests/setup
+          # Conditionally push based on the event type
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
