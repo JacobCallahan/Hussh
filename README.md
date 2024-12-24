@@ -176,7 +176,6 @@ There isn't even proper exception handling, so expect some Rust panics to fall t
 With that said, try it out and let me know your thoughts!
 
 # Future Features
-- Proper exception handling
 - Concurrent actions class
 - Async Connection class
 - Low level bindings
