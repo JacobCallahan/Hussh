@@ -188,18 +188,6 @@ def test_hangup_shell_context(conn):
     assert sh.result.stdout
 
 
-def test_session_timeout():
-    """Test that we can trigger a timeout on session handshake."""
-    with pytest.raises(TimeoutError):
-        Connection(host="localhost", port=8022, password="toor", timeout=10)
-
-
-def test_command_timeout(conn):
-    """Test that we can trigger a timeout on command execution."""
-    with pytest.raises(TimeoutError):
-        conn.execute("sleep 5", timeout=3000)
-
-
 def test_remote_copy(conn, run_second_server):
     """Test that we can copy a file from one server to another."""
     # First copy the test file to the first server
@@ -220,3 +208,36 @@ def test_tail(conn):
         assert tf.last_pos == len(TEST_STR)
         conn.execute("echo goodbye >> /root/hello.txt")
     assert tf.contents == "goodbye\n"
+
+
+# ------------- Negative Tests -------------
+
+
+def test_session_timeout():
+    """Test that we can trigger a timeout on session handshake."""
+    with pytest.raises(TimeoutError):
+        Connection(host="localhost", port=8022, password="toor", timeout=10)
+
+
+def test_command_timeout(conn):
+    """Test that we can trigger a timeout on command execution."""
+    with pytest.raises(TimeoutError):
+        conn.execute("sleep 5", timeout=3000)
+
+
+def test_scp_write_missing_directory(conn):
+    """Test that IOError is raised if scp_write attempts to write to a missing directory."""
+    with pytest.raises(IOError):  # noqa: PT011
+        conn.scp_write_data("data", "/no_such_dir/test.txt")
+
+
+def test_sftp_read_invalid_path(conn):
+    """Test that IOError is raised if sftp_read is given an invalid remote path."""
+    with pytest.raises(IOError):  # noqa: PT011
+        conn.sftp_read("/invalid/path/file.txt")
+
+
+def test_scp_read_directory_as_file(conn):
+    """Test that IOError is raised if scp_read tries to read a directory as a file."""
+    with pytest.raises(IOError):  # noqa: PT011
+        conn.scp_read("/root")
