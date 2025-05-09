@@ -9,12 +9,17 @@ name = "hussh"
 crate-type = ["cdylib"]
 
 [dependencies]
-openssl = { version = "0.10.68", features = ["vendored"] }
-pyo3 = "0.23.1"
-shellexpand = "3.1.0"
-# ssh2 = "0.9"
-# temporary until ssh2#312 makes it into a release. probably 0.9.5
-ssh2 = { git = "https://github.com/alexcrichton/ssh2-rs", branch = "master" }
+async-ssh2-tokio = "0.8.14"
+openssl = { version = "0.10.72", features = ["vendored"] }
+pyo3 = { version = "0.20.3", features = ["extension-module", "abi3-py38", "chrono"] }
+pyo3-asyncio = { version = "0.20.0", features = ["attributes", "tokio-runtime"] }
+shellexpand = "3.1.1"
+ssh2 = "0.9"
+tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+libc = "0.2.152"
+tempfile = "3.10.0"
+base64 = "0.21.7" # Added base64 for file encoding/decoding
+futures = "0.3" # Added futures for Future and StreamExt traits
 
 [profile.release]
 lto = true

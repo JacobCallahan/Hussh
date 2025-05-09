@@ -170,6 +170,62 @@ print(shell.result.stdout)
 ```
 **Note:** The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
 
+# Async Operations
+For applications requiring asynchronous operations, Hussh provides an `AsyncConnection` class. It mirrors the functionality of the synchronous `Connection` class but operates asynchronously, making it suitable for non-blocking I/O tasks.
+
+```python
+import asyncio
+from hussh import AsyncConnection
+
+async def main():
+    conn = await AsyncConnection(host="my.test.server", username="user", password="pass")
+    result = await conn.execute("ls")
+    print(result.stdout)
+    await conn.close()
+
+asyncio.run(main())
+```
+
+## Async SFTP and SCP
+Similar to the synchronous version, `AsyncConnection` supports SFTP and SCP operations.
+
+```python
+# Async SFTP write
+await conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
+await conn.sftp_write_data(data="Hello there!", remote_path="/dest/path/file")
+
+# Async SFTP read
+contents = await conn.sftp_read(remote_path="/dest/path/file")
+
+# Async SCP write
+await conn.scp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
+await conn.scp_write_data(data="Hello there!", remote_path="/dest/path/file")
+
+# Async SCP read
+contents = await conn.scp_read(remote_path="/dest/path/file")
+```
+
+## Async Interactive Shell
+The `AsyncConnection` also provides an asynchronous interactive shell.
+
+```python
+async with conn.shell() as shell:
+   await shell.send("ls")
+   await shell.send("pwd")
+   await shell.send("whoami")
+
+print(shell.result.stdout)
+```
+
+## Async Tailing Files
+```python
+async with conn.tail("/path/to/file.txt") as tf:
+   # perform some actions or wait
+   print(await tf.read())  # at any time, you can read any unread contents
+   # when you're done tailing, exit the context manager
+print(tf.contents) # Note: .contents will be the result of the final read on exit
+```
+
 # Disclaimer
 This is a VERY early project that should not be used in production code!
 There isn't even proper exception handling, so expect some Rust panics to fall through.

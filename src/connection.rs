@@ -54,21 +54,29 @@
 //! ```
 //!
 //! Note: The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
-use pyo3::create_exception;
-use pyo3::prelude::*;
-use ssh2::{Channel, Session};
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::io::Seek; // Add Seek trait for seek and stream_position methods
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
+use std::ops::Bound;
 use std::path::Path;
+use std::time::Duration; // Add Bound for __exit__ methods
 
+use pyo3::create_exception;
 use pyo3::exceptions::{PyIOError, PyTimeoutError};
+use pyo3::prelude::*;
+use pyo3::types::PyAny;
 
-const MAX_BUFF_SIZE: usize = 65536;
+use ssh2::{Channel, Session};
+
+// Define exceptions
 create_exception!(
     connection,
     AuthenticationError,
     pyo3::exceptions::PyException
 );
+
+// Define constants
+const MAX_BUFF_SIZE: usize = 65536; // 64KB
 
 fn read_from_channel(channel: &mut Channel) -> Result<SSHResult, PyErr> {
     // TODO: handle errors better instead of just raising a PyTimeoutError
@@ -546,7 +554,6 @@ impl Connection {
     ///     time.sleep(5)  # wait or perform other operations
     ///     print(tailer.read())
     ///     time.sleep(5)  # wait or perform other operations
-    /// print(tailer.contents)
     /// ```
     fn tail(&self, remote_file: String) -> FileTailer {
         FileTailer::new(self, remote_file, None)
@@ -570,9 +577,9 @@ impl Connection {
     #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __exit__(
         &mut self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_value: Option<&Bound<'_, PyAny>>,
-        _traceback: Option<&Bound<'_, PyAny>>,
+        _exc_type: Option<&PyAny>,
+        _exc_value: Option<&PyAny>,
+        _traceback: Option<&PyAny>,
     ) -> PyResult<()> {
         let _ = self.close();
         Ok(())
@@ -687,9 +694,9 @@ impl InteractiveShell {
     #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __exit__(
         &mut self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_value: Option<&Bound<'_, PyAny>>,
-        _traceback: Option<&Bound<'_, PyAny>>,
+        _exc_type: Option<&PyAny>,
+        _exc_value: Option<&PyAny>,
+        _traceback: Option<&PyAny>,
     ) -> PyResult<()> {
         if self.pty {
             self.send("exit\n".to_string(), Some(false)).unwrap();
@@ -784,9 +791,9 @@ impl FileTailer {
     #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __exit__(
         &mut self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_value: Option<&Bound<'_, PyAny>>,
-        _traceback: Option<&Bound<'_, PyAny>>,
+        _exc_type: Option<&PyAny>,
+        _exc_value: Option<&PyAny>,
+        _traceback: Option<&PyAny>,
     ) -> PyResult<()> {
         self.contents = Some(self.read(self.init_pos));
         Ok(())
