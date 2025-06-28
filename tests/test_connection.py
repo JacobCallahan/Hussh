@@ -1,11 +1,11 @@
 """Tests for hussh.connection module."""
 
-import shutil
 from pathlib import Path
+import shutil
 
 import pytest
 
-from hussh import Connection, SSHResult
+from hussh import AuthenticationError, Connection, SSHResult
 
 TEXT_FILE = Path("tests/data/hp.txt").resolve()
 IMG_FILE = Path("tests/data/puppy.jpeg").resolve()
@@ -63,16 +63,16 @@ def test_default_key_auth():
     ssh_dir = Path.home() / ".ssh"
     ssh_dir.mkdir(exist_ok=True, mode=0o700)
     default_key_path = ssh_dir / "id_rsa"
-    
+
     # Only run test if default key doesn't already exist to avoid conflicts
     if default_key_path.exists():
         pytest.skip("Default SSH key already exists, skipping test to avoid conflicts")
-    
+
     # Copy the test key to the default location
-    import shutil
+
     shutil.copy2(key_path, default_key_path)
     default_key_path.chmod(0o600)  # Set correct permissions for SSH key
-    
+
     try:
         # Test connection without specifying private_key - should use default key
         conn = Connection(host="localhost", port=8022)
@@ -88,23 +88,22 @@ def test_default_key_auth():
 
 
 def test_no_default_keys_auth_failure():
-    """Test that authentication fails gracefully when no default keys are found and no ssh-agent."""
-    # Ensure no default SSH keys exist by temporarily renaming ~/.ssh directory if it exists  
+    """Test that authentication fails gracefully when no default keys and no ssh-agent."""
+    # Ensure no default SSH keys exist by temporarily renaming ~/.ssh directory if it exists
     ssh_dir = Path.home() / ".ssh"
     backup_dir = Path.home() / ".ssh_backup_for_test"
-    
+
     # Backup existing .ssh directory if it exists
     ssh_exists = ssh_dir.exists()
     if ssh_exists:
         ssh_dir.rename(backup_dir)
-    
+
     try:
         # This should fail since there are no default keys and likely no ssh-agent
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(
+            AuthenticationError, match="Failed to authenticate with ssh-agent and default SSH keys"
+        ):
             Connection(host="localhost", port=8022)
-        
-        # Verify the error message mentions both ssh-agent and default keys
-        assert "Failed to authenticate with ssh-agent and default SSH keys" in str(exc_info.value)
     finally:
         # Restore the .ssh directory if it existed
         if ssh_exists and backup_dir.exists():
