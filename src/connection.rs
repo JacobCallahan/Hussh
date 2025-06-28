@@ -29,16 +29,20 @@
 //! print(result.stdout)
 //! ```
 //!
-//! Multiple forms of authentication are supported. You can use a password, a private key, or the default ssh-agent.
+//! Multiple forms of authentication are supported. You can use a password, a private key, or default SSH authentication (ssh-agent + default keys).
 //!
 //! ```python
 //! conn = Connection("my.test.server", username="user", private_key="~/.ssh/id_rsa")
 //! conn = Connection("my.test.server", username="user", password="pass")
-//! conn = Connection("my.test.server", username="user")
+//! conn = Connection("my.test.server", username="user")  # Uses ssh-agent, then tries default SSH keys
 //! ````
 //!
 //! If you don't pass a port, the default SSH port (22) is used.
 //! If you don't pass a username, "root" is used.
+//!
+//! When no password or private_key is specified, the connection will attempt authentication in this order:
+//! 1. SSH agent (if available)
+//! 2. Default SSH key files: ~/.ssh/id_rsa, ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa, ~/.ssh/id_dsa
 //!
 //! To use the interactive shell, it is recommended to use the shell() context manager from the Connection class.
 //! You can send commands to the shell using the `send` method, then get the results from result when you exit the context manager.
@@ -271,11 +275,33 @@ impl Connection {
                 .userauth_password(username, password)
                 .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
         } else {
-            // if password isn't set, try using the default ssh-agent
+            // if password isn't set, try using the default ssh-agent first
             if session.userauth_agent(username).is_err() {
-                return Err(PyErr::new::<AuthenticationError, _>(
-                    "Failed to authenticate with ssh-agent",
-                ));
+                // if ssh-agent fails, try default SSH key files in common order of preference
+                // This mimics the behavior of standard SSH clients
+                let default_keys = [
+                    "~/.ssh/id_rsa",      // RSA keys (most common)
+                    "~/.ssh/id_ed25519",  // Ed25519 keys (modern, secure)
+                    "~/.ssh/id_ecdsa",    // ECDSA keys  
+                    "~/.ssh/id_dsa",      // DSA keys (legacy)
+                ];
+                
+                let mut auth_success = false;
+                for key_path in &default_keys {
+                    let expanded_key_path = shellexpand::tilde(key_path).into_owned();
+                    if Path::new(&expanded_key_path).exists() {
+                        if session.userauth_pubkey_file(username, None, Path::new(&expanded_key_path), None).is_ok() {
+                            auth_success = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if !auth_success {
+                    return Err(PyErr::new::<AuthenticationError, _>(
+                        "Failed to authenticate with ssh-agent and default SSH keys",
+                    ));
+                }
             }
         }
         Ok(Connection {
