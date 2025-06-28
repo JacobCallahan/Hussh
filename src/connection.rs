@@ -280,23 +280,30 @@ impl Connection {
                 // if ssh-agent fails, try default SSH key files in common order of preference
                 // This mimics the behavior of standard SSH clients
                 let default_keys = [
-                    "~/.ssh/id_rsa",      // RSA keys (most common)
-                    "~/.ssh/id_ed25519",  // Ed25519 keys (modern, secure)
-                    "~/.ssh/id_ecdsa",    // ECDSA keys  
-                    "~/.ssh/id_dsa",      // DSA keys (legacy)
+                    "~/.ssh/id_rsa",     // RSA keys (most common)
+                    "~/.ssh/id_ed25519", // Ed25519 keys (modern, secure)
+                    "~/.ssh/id_ecdsa",   // ECDSA keys
+                    "~/.ssh/id_dsa",     // DSA keys (legacy)
                 ];
-                
+
                 let mut auth_success = false;
                 for key_path in &default_keys {
                     let expanded_key_path = shellexpand::tilde(key_path).into_owned();
-                    if Path::new(&expanded_key_path).exists() {
-                        if session.userauth_pubkey_file(username, None, Path::new(&expanded_key_path), None).is_ok() {
-                            auth_success = true;
-                            break;
-                        }
+                    if Path::new(&expanded_key_path).exists()
+                        && session
+                            .userauth_pubkey_file(
+                                username,
+                                None,
+                                Path::new(&expanded_key_path),
+                                None,
+                            )
+                            .is_ok()
+                    {
+                        auth_success = true;
+                        break;
                     }
                 }
-                
+
                 if !auth_success {
                     return Err(PyErr::new::<AuthenticationError, _>(
                         "Failed to authenticate with ssh-agent and default SSH keys",
