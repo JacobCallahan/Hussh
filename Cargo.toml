@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 openssl = { version = "0.10.68", features = ["vendored"] }
-pyo3 = "0.25.0"
+pyo3 = "0.26.0"
 shellexpand = "3.1.0"
 # ssh2 = "0.9"
 # temporary until ssh2#312 makes it into a release. probably 0.9.5
