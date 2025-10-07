@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
           check-latest: true
@@ -71,7 +71,7 @@ jobs:
           - 8022:22
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
           check-latest: true
@@ -134,7 +134,7 @@ jobs:
           - 8022:22
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
           check-latest: true
@@ -223,7 +223,7 @@ jobs:
       - name: Install OpenSSL
         run: |
           brew install openssl@1.1
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
           check-latest: true
