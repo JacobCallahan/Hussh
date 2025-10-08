@@ -1,5 +1,5 @@
 # Use the official Python image from the Docker Hub
-FROM python:3.10
+FROM python:3.14
 
 # Set environment variables
 ENV PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig
