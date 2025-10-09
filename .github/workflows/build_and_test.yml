@@ -18,7 +18,7 @@ jobs:
   code_checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
@@ -33,7 +33,7 @@ jobs:
     needs: [code_checks]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build sdist
         uses: PyO3/maturin-action@main
         with:
@@ -72,7 +72,7 @@ jobs:
         ports:
           - 8022:22
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
@@ -135,7 +135,7 @@ jobs:
         ports:
           - 8022:22
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version-file: 'pyproject.toml'
@@ -181,7 +181,7 @@ jobs:
           - runner: windows-latest
             target: x86
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenSSL
         shell: powershell
         run: |
@@ -219,7 +219,7 @@ jobs:
           - runner: macos-14
             target: aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenSSL
         run: |
           brew install openssl@1.1
