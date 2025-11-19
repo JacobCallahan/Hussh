@@ -3,18 +3,25 @@ name = "hussh"
 version = "0.1.9"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "hussh"
 crate-type = ["cdylib"]
 
+[features]
+default = ["async"]
+async = []
+
 [dependencies]
-openssl = { version = "0.10.68", features = ["vendored"] }
+ssh2 = "0.9.5"
+openssl = { version = "0.10", features = ["vendored"] }
 pyo3 = { version = "0.26.0", features = ["generate-import-lib"] }
 shellexpand = "3.1.0"
-# ssh2 = "0.9"
-# temporary until ssh2#312 makes it into a release. probably 0.9.5
-ssh2 = { git = "https://github.com/alexcrichton/ssh2-rs", branch = "master" }
+pyo3-async-runtimes = { version = "0.26.0", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["full"] }
+russh = { version = "0.44", default-features = false, features = ["flate2"] }
+russh-keys = { version = "0.44", default-features = false }
+async-trait = "0.1"
+base64ct = "=1.6.0"
 
 [profile.release]
 lto = true

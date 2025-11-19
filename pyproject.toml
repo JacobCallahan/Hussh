@@ -42,6 +42,7 @@ dev = [
     "pexpect",
     "pre-commit",
     "pytest",
+    "pytest-asyncio",
     "pytest-randomly",
     "ruff",
 ]
