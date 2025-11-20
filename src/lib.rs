@@ -22,6 +22,10 @@ fn hussh(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
         async_submodule.add_class::<asynchronous::AsyncInteractiveShell>()?;
         async_submodule.add_class::<asynchronous::AsyncFileTailer>()?;
         m.add_submodule(&async_submodule)?;
+
+        let sys = PyModule::import(_py, "sys")?;
+        let modules = sys.getattr("modules")?;
+        modules.set_item("hussh.aio", &async_submodule)?;
     }
 
     Ok(())

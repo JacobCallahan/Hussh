@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.14"
+# dependencies = [
+#     "memray",
+#     "ssh2-python",
+# ]
+# ///
 import json
 from pathlib import Path
 from pprint import pprint
