@@ -18,6 +18,9 @@ fn hussh(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         let async_submodule = PyModule::new(_py, "aio")?;
         async_submodule.add_class::<asynchronous::AsyncConnection>()?;
+        async_submodule.add_class::<asynchronous::AsyncSftpClient>()?;
+        async_submodule.add_class::<asynchronous::AsyncInteractiveShell>()?;
+        async_submodule.add_class::<asynchronous::AsyncFileTailer>()?;
         m.add_submodule(&async_submodule)?;
     }
 
