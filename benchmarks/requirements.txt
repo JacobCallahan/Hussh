@@ -2,7 +2,8 @@
 hussh
 fabric  # also fulfills paramiko
 # pylibssh
-ssh2-python312
+ssh2-python
+asyncssh
 
 # used for benchmarking memory usage
 memray

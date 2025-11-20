@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.14"
+# dependencies = [
+#     "memray",
+#     "paramiko",
+# ]
+# ///
 import json
 from pathlib import Path
 from pprint import pprint

@@ -7,8 +7,23 @@ from rich.table import Table
 
 
 def run_all():
-    """Find all the python files in this directory starting with bench_ and run them."""
+    """Find all the python files in this directory starting with bench_ and run them in groups."""
+    sync_benchmarks = []
+    async_benchmarks = []
+
     for file in Path(__file__).parent.glob("bench_*.py"):
+        if "async" in file.stem:
+            async_benchmarks.append(file)
+        else:
+            sync_benchmarks.append(file)
+
+    print("Running synchronous benchmarks...")
+    for file in sync_benchmarks:
+        print(f"Running {file}")
+        subprocess.run(["python", file], check=True)
+
+    print("\nRunning asynchronous benchmarks...")
+    for file in async_benchmarks:
         print(f"Running {file}")
         subprocess.run(["python", file], check=True)
 
@@ -31,15 +46,52 @@ def run_memray_reports(report_dict):
 
 
 def print_report(report_dict):
-    """Print out the report in a rich table"""
-    report_table = Table(title="Benchmark Report")
-    # Add the columns
-    report_table.add_column("Library")
-    for key in report_dict["hussh"]:
-        report_table.add_column(key)
-    for lib in report_dict:
-        report_table.add_row(lib, *[report_dict[lib][key] for key in report_dict[lib]])
-    Console().print(report_table)
+    """Print out the report in rich tables"""
+    sync_libs = [lib for lib in report_dict if not lib.startswith("async")]
+    async_libs = [lib for lib in report_dict if lib.startswith("async")]
+
+    if sync_libs:
+        sync_table = Table(title="Synchronous Benchmark Report")
+        sync_table.add_column("Library")
+        if sync_libs:
+            for key in report_dict[sync_libs[0]]:
+                sync_table.add_column(key.replace("_", " ").title())
+        for lib in sync_libs:
+            row = [lib.replace("_", " ").title()] + [
+                report_dict[lib][key] for key in report_dict[lib]
+            ]
+            sync_table.add_row(*row)
+        Console().print(sync_table)
+        Console().print()
+
+    if async_libs:
+        async_table = Table(title="Asynchronous Benchmark Report")
+        async_table.add_column("Library")
+        async_table.add_column("Concurrency")
+        # Get metric keys from single task
+        sample_lib = async_libs[0]
+        sample_concurrency = report_dict[sample_lib]["single"]
+        for key in sample_concurrency:
+            async_table.add_column(key.replace("_", " ").title())
+        # Add peak memory and allocations if present
+        if "peak_memory" in report_dict[sample_lib]:
+            async_table.add_column("Peak Memory")
+            async_table.add_column("Allocations")
+
+        for lib in async_libs:
+            lib_data = report_dict[lib]
+            for concurrency in ["single", "10_tasks", "100_tasks"]:
+                if concurrency in lib_data:
+                    row = [
+                        lib.replace("async_", "").replace("_", " ").title(),
+                        concurrency.replace("_", " ").title(),
+                    ]
+                    row.extend(lib_data[concurrency][key] for key in sample_concurrency)
+                    if "peak_memory" in lib_data:
+                        row.append(lib_data["peak_memory"])
+                        row.append(lib_data["allocations"])
+                    async_table.add_row(*row)
+        Console().print(async_table)
 
 
 if __name__ == "__main__":

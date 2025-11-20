@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-import hussh
+from hussh.aio import AsyncConnection
 
 
 @pytest.mark.asyncio
@@ -16,9 +16,7 @@ async def test_async_connection_basic(run_test_server):
     username = "root"
     password = "toor"
 
-    async with hussh.aio.AsyncConnection(
-        host, username=username, password=password, port=port
-    ) as conn:
+    async with AsyncConnection(host, username=username, password=password, port=port) as conn:
         result = await conn.execute("echo hello")
         # result is (stdout, stderr, exit_code)
         assert result[0].strip() == "hello"
@@ -32,7 +30,7 @@ async def test_async_connection_manual(run_test_server):
     username = "root"
     password = "toor"
 
-    conn = hussh.aio.AsyncConnection(host, username=username, password=password, port=port)
+    conn = AsyncConnection(host, username=username, password=password, port=port)
     await conn.connect()
 
     result = await conn.execute("echo manual")
@@ -49,9 +47,7 @@ async def test_async_sftp(run_test_server, tmp_path):
     username = "root"
     password = "toor"
 
-    async with hussh.aio.AsyncConnection(
-        host, username=username, password=password, port=port
-    ) as conn:
+    async with AsyncConnection(host, username=username, password=password, port=port) as conn:
         sftp = await conn.sftp()
 
         # Test put
@@ -79,25 +75,22 @@ async def test_async_shell(run_test_server):
     username = "root"
     password = "toor"
 
-    async with hussh.aio.AsyncConnection(
-        host, username=username, password=password, port=port
-    ) as conn:
-        shell = await conn.shell(pty=True)
-
+    async with (
+        AsyncConnection(host, username=username, password=password, port=port) as conn,
+        await conn.shell(pty=True) as shell,
+    ):
         # We need to wait a bit for the shell to be ready and print the prompt
         await asyncio.sleep(0.5)
         _ = await shell.read()  # Clear initial banner/prompt
 
-        await shell.write(b"echo hello shell\n")
+        await shell.send("echo hello shell")
 
         # Give it a moment to process
         await asyncio.sleep(0.5)
 
         output = await shell.read()
         # Output will contain the echo command itself and the result
-        assert b"hello shell" in output
-
-        await shell.close()
+        assert "hello shell" in output
 
 
 @pytest.mark.asyncio
@@ -107,22 +100,19 @@ async def test_async_file_tailer(run_test_server, tmp_path):
     username = "root"
     password = "toor"
 
-    async with hussh.aio.AsyncConnection(
-        host, username=username, password=password, port=port
-    ) as conn:
+    async with AsyncConnection(host, username=username, password=password, port=port) as conn:
         # Create a test file on the remote server
         await conn.execute("echo 'line 1' > /root/test_tail.log")
         await conn.execute("echo 'line 2' >> /root/test_tail.log")
 
         async with conn.tail("/root/test_tail.log") as tailer:
-            # Initially, should have the full content
-            content = await tailer.read(0)
-            assert "line 1" in content
-            assert "line 2" in content
+            # Initially, we should be at the end of the file
+            content = await tailer.read()
+            assert content == ""
 
             # Add more lines
             await conn.execute("echo 'line 3' >> /root/test_tail.log")
 
             # Read from last position
-            new_content = await tailer.read(None)
+            new_content = await tailer.read()
             assert "line 3" in new_content

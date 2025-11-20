@@ -6,6 +6,13 @@ RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/g' /etc/ssh
 RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/g' /etc/ssh/sshd_config
 # Ensure ForceCommand is not set, which could result in scp not working
 RUN sed -i 's/^ForceCommand/#ForceCommand/g' /etc/ssh/sshd_config
+# Increase connection limits for benchmarking
+RUN echo 'MaxSessions 200' >> /etc/ssh/sshd_config
+RUN echo 'MaxStartups 200:30:300' >> /etc/ssh/sshd_config
+RUN echo 'LoginGraceTime 120' >> /etc/ssh/sshd_config
+RUN echo 'ClientAliveInterval 60' >> /etc/ssh/sshd_config
+RUN echo 'ClientAliveCountMax 3' >> /etc/ssh/sshd_config
+RUN echo 'TCPKeepAlive yes' >> /etc/ssh/sshd_config
 RUN ssh-keygen -A
 COPY authorized_keys /root/.ssh/authorized_keys
 EXPOSE 22

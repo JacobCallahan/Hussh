@@ -427,18 +427,32 @@ impl AsyncSftpClient {
 }
 
 #[pyclass]
+#[derive(Clone)]
 pub struct AsyncInteractiveShell {
     channel: Arc<Mutex<russh::Channel<russh::client::Msg>>>,
 }
 
 #[pymethods]
 impl AsyncInteractiveShell {
-    fn write<'p>(&self, py: Python<'p>, data: Vec<u8>) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (data, add_newline=None))]
+    fn send<'p>(
+        &self,
+        py: Python<'p>,
+        data: String,
+        add_newline: Option<bool>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let channel = self.channel.clone();
+        let add_newline = add_newline.unwrap_or(true);
+        let data = if add_newline && !data.ends_with('\n') {
+            format!("{}\n", data)
+        } else {
+            data
+        };
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = channel.lock().await;
             guard
-                .data(&data[..])
+                .data(data.as_bytes())
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             Ok(())
@@ -462,9 +476,9 @@ impl AsyncInteractiveShell {
                         buffer.extend_from_slice(&data);
                         break;
                     }
-                    Ok(Some(_)) => continue,       // Ignore other events
-                    Ok(None) => return Ok(buffer), // Channel closed
-                    Err(_) => return Ok(buffer),   // Timeout waiting for first packet
+                    Ok(Some(_)) => continue, // Ignore other events
+                    Ok(None) => return Ok(String::new()), // Channel closed
+                    Err(_) => return Ok(String::new()), // Timeout waiting for first packet
                 }
             }
 
@@ -484,7 +498,7 @@ impl AsyncInteractiveShell {
                 }
             }
 
-            Ok(buffer)
+            Ok(String::from_utf8_lossy(&buffer).to_string())
         })
     }
 
@@ -498,6 +512,21 @@ impl AsyncInteractiveShell {
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             Ok(())
         })
+    }
+
+    fn __aenter__<'p>(slf: PyRef<'p, Self>, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let py_self = Bound::new(py, (*slf).clone())?.into_any().unbind();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(py_self) })
+    }
+
+    fn __aexit__<'p>(
+        &self,
+        py: Python<'p>,
+        _exc_type: Option<Bound<'p, PyAny>>,
+        _exc_value: Option<Bound<'p, PyAny>>,
+        _traceback: Option<Bound<'p, PyAny>>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        self.close(py)
     }
 }
 
@@ -516,30 +545,37 @@ pub struct AsyncFileTailer {
     state: Arc<Mutex<TailerState>>,
 }
 
+impl AsyncFileTailer {
+    async fn _seek_end(state: Arc<Mutex<TailerState>>, remote_file: String) -> PyResult<u64> {
+        let mut guard = state.lock().await;
+        if let Some(sftp) = &guard.sftp {
+            let metadata = sftp
+                .metadata(&remote_file)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Stat error: {}", e)))?;
+            let size = metadata.size.unwrap_or(0);
+            guard.last_pos = size;
+            if guard.init_pos.is_none() {
+                guard.init_pos = Some(size);
+            }
+            Ok(size)
+        } else {
+            Err(PyRuntimeError::new_err("SFTP session not initialized"))
+        }
+    }
+}
+
 #[pymethods]
 impl AsyncFileTailer {
     fn seek_end<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let state = self.state.clone();
         let remote_file = self.remote_file.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = state.lock().await;
-            if let Some(sftp) = &guard.sftp {
-                let metadata = sftp
-                    .metadata(&remote_file)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Stat error: {}", e)))?;
-                let size = metadata.size.unwrap_or(0);
-                guard.last_pos = size;
-                if guard.init_pos.is_none() {
-                    guard.init_pos = Some(size);
-                }
-                Ok(size)
-            } else {
-                Err(PyRuntimeError::new_err("SFTP session not initialized"))
-            }
+            AsyncFileTailer::_seek_end(state, remote_file).await
         })
     }
 
+    #[pyo3(signature = (from_pos=None))]
     fn read<'p>(&self, py: Python<'p>, from_pos: Option<u64>) -> PyResult<Bound<'p, PyAny>> {
         let state = self.state.clone();
         let remote_file = self.remote_file.clone();
@@ -601,20 +637,12 @@ impl AsyncFileTailer {
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let mut state_guard = state.lock().await;
-            state_guard.sftp = Some(sftp);
-
-            if let Some(sftp) = &state_guard.sftp {
-                let metadata = sftp
-                    .metadata(&remote_file)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Stat error: {}", e)))?;
-                let size = metadata.size.unwrap_or(0);
-                state_guard.last_pos = size;
-                if state_guard.init_pos.is_none() {
-                    state_guard.init_pos = Some(size);
-                }
+            {
+                let mut state_guard = state.lock().await;
+                state_guard.sftp = Some(sftp);
             }
+
+            AsyncFileTailer::_seek_end(state, remote_file).await?;
 
             Ok(py_self)
         })

@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.14"
+# dependencies = [
+#     "fabric",
+#     "memray",
+# ]
+# ///
 import json
 from pathlib import Path
 from pprint import pprint

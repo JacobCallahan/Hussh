@@ -170,14 +170,62 @@ print(shell.result.stdout)
 ```
 **Note:** The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
 
+# Asynchronous Usage
+Hussh also offers an `AsyncConnection` class for asynchronous operations.
+
+## QuickStart
+```python
+import asyncio
+from hussh.aio import AsyncConnection
+
+async def main():
+    async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
+        stdout, stderr, rc = await conn.execute("ls")
+    print(stdout)
+
+asyncio.run(main())
+```
+
+## SFTP
+Async SFTP operations are available through the `sftp()` method.
+```python
+async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
+    sftp = await conn.sftp()
+    # Upload
+    await sftp.put(local_path="local.txt", remote_path="remote.txt")
+    # Download
+    await sftp.get(remote_path="remote.txt", local_path="downloaded.txt")
+    # List
+    files = await sftp.list(".")
+```
+
+## Interactive Shell
+```python
+async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
+    async with await conn.shell() as shell:
+        await shell.send("ls")
+        output = await shell.read()
+        print(output)
+        # one of the advantages of an async shell is that you can read and write multiple times
+        await shell.send("whoami")
+        user = await shell.read()
+        print(f"I'm logged in as {user}")
+```
+
+## Tailing Files
+```python
+async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
+    async with conn.tail("/path/to/file.txt") as tf:
+        print(await tf.read())
+```
+
 # Disclaimer
-This is a VERY early project that should not be used in production code!
-There isn't even proper exception handling, so expect some Rust panics to fall through.
+This is an early project that should not be used in sentitive production code!
+There isn't full exception handling, so expect some Rust panics to fall through.
 With that said, try it out and let me know your thoughts!
 
 # Future Features
 - Concurrent actions class
-- Async Connection class
 - Low level bindings
 - Misc codebase improvements
 - TBD...
