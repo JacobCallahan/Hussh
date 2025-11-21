@@ -180,10 +180,26 @@ from hussh.aio import AsyncConnection
 
 async def main():
     async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
-        stdout, stderr, rc = await conn.execute("ls")
-    print(stdout)
+        result = await conn.execute("ls")
+    print(result.stdout)
 
 asyncio.run(main())
+```
+
+## Timeouts
+You can specify a timeout (in seconds) for the connection and for individual command executions.
+
+```python
+# Set a default timeout for the connection
+async with AsyncConnection(host="my.test.server", timeout=10) as conn:
+    # This command will use the connection's default timeout (10s)
+    await conn.execute("sleep 5")
+    
+    # You can override the timeout for specific commands
+    try:
+        await conn.execute("sleep 20", timeout=5)
+    except TimeoutError:
+        print("Command timed out!")
 ```
 
 ## SFTP
@@ -204,12 +220,12 @@ async with AsyncConnection(host="my.test.server", username="user", password="pas
 async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
     async with await conn.shell() as shell:
         await shell.send("ls")
-        output = await shell.read()
-        print(output)
+        result = await shell.read()
+        print(result.stdout)
         # one of the advantages of an async shell is that you can read and write multiple times
         await shell.send("whoami")
-        user = await shell.read()
-        print(f"I'm logged in as {user}")
+        result = await shell.read()
+        print(f"I'm logged in as {result.stdout}")
 ```
 
 ## Tailing Files
@@ -217,6 +233,8 @@ async with AsyncConnection(host="my.test.server", username="user", password="pas
 async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
     async with conn.tail("/path/to/file.txt") as tf:
         print(await tf.read())
+    # You can also access the full contents read during the session
+    print(tf.contents)
 ```
 
 # Disclaimer
