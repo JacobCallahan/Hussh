@@ -239,15 +239,19 @@ impl AsyncConnection {
                     return Err(PyValueError::new_err("No authentication method provided"));
                 };
 
-                if let Err(e) = auth_res {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "Authentication failed: {}",
-                        e
-                    )));
-                }
-
-                if !auth_res.unwrap() {
-                    return Err(PyRuntimeError::new_err("Authentication failed"));
+                match auth_res {
+                    Ok(true) => {
+                        // Authentication succeeded
+                    }
+                    Ok(false) => {
+                        return Err(PyRuntimeError::new_err("Authentication failed"));
+                    }
+                    Err(e) => {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "Authentication failed: {}",
+                            e
+                        )));
+                    }
                 }
 
                 let mut guard = session_arc.lock().await;
@@ -387,14 +391,19 @@ impl AsyncConnection {
                     return Err(PyValueError::new_err("No authentication method provided"));
                 };
 
-                if let Err(e) = auth_res {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "Authentication failed: {}",
-                        e
-                    )));
-                }
-                if !auth_res.unwrap() {
-                    return Err(PyRuntimeError::new_err("Authentication failed"));
+                match auth_res {
+                    Ok(true) => {
+                        // Authentication succeeded
+                    }
+                    Ok(false) => {
+                        return Err(PyRuntimeError::new_err("Authentication failed"));
+                    }
+                    Err(e) => {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "Authentication failed: {}",
+                            e
+                        )));
+                    }
                 }
 
                 let mut guard = session_arc.lock().await;
