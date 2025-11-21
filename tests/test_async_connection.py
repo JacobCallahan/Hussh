@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -7,47 +8,27 @@ from hussh.aio import AsyncConnection
 
 @pytest.mark.asyncio
 async def test_async_connection_basic(run_test_server):
-    # run_test_server returns a container object.
-    # We need to know the port.
-    # conftest.py maps 22 to 8022.
-
-    host = "localhost"
-    port = 8022
-    username = "root"
-    password = "toor"
-
-    async with AsyncConnection(host, username=username, password=password, port=port) as conn:
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
         result = await conn.execute("echo hello")
-        # result is (stdout, stderr, exit_code)
-        assert result[0].strip() == "hello"
-        assert result[2] == 0
+        assert result.stdout.strip() == "hello"
+        assert result.status == 0
 
 
 @pytest.mark.asyncio
 async def test_async_connection_manual(run_test_server):
-    host = "localhost"
-    port = 8022
-    username = "root"
-    password = "toor"
-
-    conn = AsyncConnection(host, username=username, password=password, port=port)
+    conn = AsyncConnection("localhost", username="root", password="toor", port=8022)
     await conn.connect()
 
     result = await conn.execute("echo manual")
-    assert result[0].strip() == "manual"
-    assert result[2] == 0
+    assert result.stdout.strip() == "manual"
+    assert result.status == 0
 
     await conn.close()
 
 
 @pytest.mark.asyncio
 async def test_async_sftp(run_test_server, tmp_path):
-    host = "localhost"
-    port = 8022
-    username = "root"
-    password = "toor"
-
-    async with AsyncConnection(host, username=username, password=password, port=port) as conn:
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
         sftp = await conn.sftp()
 
         # Test put
@@ -70,13 +51,8 @@ async def test_async_sftp(run_test_server, tmp_path):
 
 @pytest.mark.asyncio
 async def test_async_shell(run_test_server):
-    host = "localhost"
-    port = 8022
-    username = "root"
-    password = "toor"
-
     async with (
-        AsyncConnection(host, username=username, password=password, port=port) as conn,
+        AsyncConnection("localhost", username="root", password="toor", port=8022) as conn,
         await conn.shell(pty=True) as shell,
     ):
         # We need to wait a bit for the shell to be ready and print the prompt
@@ -88,19 +64,14 @@ async def test_async_shell(run_test_server):
         # Give it a moment to process
         await asyncio.sleep(0.5)
 
-        output = await shell.read()
+        result = await shell.read()
         # Output will contain the echo command itself and the result
-        assert "hello shell" in output
+        assert "hello shell" in result.stdout
 
 
 @pytest.mark.asyncio
 async def test_async_file_tailer(run_test_server, tmp_path):
-    host = "localhost"
-    port = 8022
-    username = "root"
-    password = "toor"
-
-    async with AsyncConnection(host, username=username, password=password, port=port) as conn:
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
         # Create a test file on the remote server
         await conn.execute("echo 'line 1' > /root/test_tail.log")
         await conn.execute("echo 'line 2' >> /root/test_tail.log")
@@ -116,3 +87,96 @@ async def test_async_file_tailer(run_test_server, tmp_path):
             # Read from last position
             new_content = await tailer.read()
             assert "line 3" in new_content
+
+        # Check contents after exit
+        assert "line 3" in tailer.contents
+
+
+@pytest.mark.asyncio
+async def test_async_password_auth(run_test_server):
+    """Test that we can establish a connection with password-based authentication."""
+    async with AsyncConnection("localhost", port=8022, password="toor", username="root") as conn:
+        result = await conn.execute("echo hello")
+        assert result.status == 0
+
+
+@pytest.mark.asyncio
+async def test_async_key_auth(run_test_server):
+    """Test that we can establish a connection with key-based authentication."""
+    async with AsyncConnection(
+        "localhost", port=8022, username="root", key_path="tests/data/test_key"
+    ) as conn:
+        result = await conn.execute("echo hello")
+        assert result.status == 0
+
+
+@pytest.mark.asyncio
+async def test_async_key_with_password_auth(run_test_server):
+    """Test that we can establish a connection with key-based authentication and a password."""
+    async with AsyncConnection(
+        "localhost",
+        port=8022,
+        username="root",
+        key_path="tests/data/auth_test_key",
+        password="husshpuppy",
+    ) as conn:
+        result = await conn.execute("echo hello")
+        assert result.status == 0
+
+
+@pytest.mark.asyncio
+async def test_async_key_in_user_home(run_test_server):
+    """Test that we can establish a connection with a key in the user's home directory."""
+    # temporarily copy the key to the user's home directory
+    key_path = Path("tests/data/test_key")
+    new_path = Path.home() / ".ssh" / "test_key"
+    new_path.parent.mkdir(exist_ok=True)
+    if new_path.exists():
+        new_path.unlink()
+    key_path.read_bytes()
+    new_path.write_bytes(key_path.read_bytes())
+    try:
+        async with AsyncConnection(
+            "localhost", port=8022, username="root", key_path="~/.ssh/test_key"
+        ) as conn:
+            result = await conn.execute("echo hello")
+            assert result.status == 0
+    finally:
+        if new_path.exists():
+            new_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_async_bad_command(run_test_server):
+    """Test that we can run a bad command."""
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
+        result = await conn.execute("kira")
+        assert result.status != 0
+        assert "command not found" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_async_session_timeout():
+    """Test that we can trigger a timeout on session handshake."""
+    # Use a non-routable IP to force timeout
+    with pytest.raises(TimeoutError):
+        async with AsyncConnection(
+            "10.255.255.1", username="root", password="toor", port=8022, timeout=1
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_async_connect_timeout():
+    """Test that we can trigger a timeout on manual connect."""
+    conn = AsyncConnection("10.255.255.1", username="root", password="toor", port=8022)
+    with pytest.raises(TimeoutError):
+        await conn.connect(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_async_command_timeout(run_test_server):
+    """Test that we can trigger a timeout on command execution."""
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
+        with pytest.raises(TimeoutError):
+            await conn.execute("sleep 5", timeout=1)

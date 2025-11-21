@@ -1,5 +1,84 @@
+//! # asynchronous.rs
+//!
+//! This module provides asynchronous versions of the SSH connection classes.
+//! It uses the `russh` library to provide async Python-friendly interfaces for SSH operations.
+//!
+//! ## Classes
+//!
+//! ### AsyncConnection
+//! An asynchronous class that represents an SSH connection. It provides methods for executing commands asynchronously, reading and writing files over SFTP, and creating an interactive shell.
+//!
+//! ### AsyncSftpClient
+//! An asynchronous class for SFTP operations, allowing listing directories, downloading, and uploading files.
+//!
+//! ### AsyncInteractiveShell
+//! An asynchronous class that represents an interactive shell over an SSH connection. It includes methods for sending commands and reading the output.
+//!
+//! ### AsyncFileTailer
+//! An asynchronous class for tailing remote files, allowing reading from a specified position in a file.
+//!
+//! ## Usage
+//!
+//! To use this module, create an `AsyncConnection` instance with the necessary connection details. Then, use the async methods on the `AsyncConnection` instance to perform SSH operations.
+//!
+//! ```python
+//! import asyncio
+//! from hussh.aio import AsyncConnection
+//!
+//! async def main():
+//!     async with AsyncConnection("my.test.server", username="user", password="pass") as conn:
+//!         result = await conn.execute("ls")
+//!         print(result.stdout)
+//!
+//! asyncio.run(main())
+//! ```
+//!
+//! Multiple forms of authentication are supported. You can use a password or a private key.
+//!
+//! ```python
+//! async with AsyncConnection("my.test.server", username="user", key_path="~/.ssh/id_rsa") as conn:
+//!     result = await conn.execute("ls")
+//!
+//! async with AsyncConnection("my.test.server", username="user", password="pass") as conn:
+//!     result = await conn.execute("ls")
+//! ```
+//!
+//! To use the interactive shell, it is recommended to use the shell() context manager from the AsyncConnection class.
+//! You can send commands to the shell using the `send` method, then get the results from the `read` method.
+//!
+//! ```python
+//! async with conn.shell() as shell:
+//!     await shell.send("ls")
+//!     await shell.send("pwd")
+//!     await shell.send("whoami")
+//!
+//! result = await shell.read()
+//! print(result.stdout)
+//! ```
+//!
+//! For SFTP operations:
+//!
+//! ```python
+//! async with conn.sftp() as sftp:
+//!     files = await sftp.list("/remote/path")
+//!     await sftp.get("/remote/file", "/local/file")
+//!     await sftp.put("/local/file", "/remote/file")
+//! ```
+//!
+//! For file tailing:
+//!
+//! ```python
+//! async with conn.tail("remote_file.log") as tailer:
+//!     await asyncio.sleep(5)  # wait or perform other operations
+//!     content = await tailer.read()
+//!     print(content)
+//!
+//! print(tailer.contents)
+//! ```
+
+use crate::connection::SSHResult;
 use async_trait::async_trait;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
 use russh_sftp::client::SftpSession;
@@ -30,6 +109,53 @@ impl Handler for ClientHandler {
     }
 }
 
+/// # AsyncConnection
+///
+/// `AsyncConnection` is an asynchronous class that represents an SSH connection. It provides methods for executing commands asynchronously, reading and writing files over SFTP, and creating an interactive shell.
+///
+/// ## Attributes
+///
+/// * `host`: The host to connect to.
+/// * `port`: The port to connect to.
+/// * `username`: The username to use for authentication.
+/// * `password`: The password to use for authentication.
+/// * `key_path`: The path to the private key to use for authentication.
+/// * `timeout`: The timeout (in seconds) for the SSH session.
+/// * `keepalive_interval`: The interval (in seconds) for sending keepalive messages.
+///
+/// ## Methods
+///
+/// ### `execute`
+///
+/// Executes a command over the SSH connection asynchronously and returns the result. It takes the following parameters:
+///
+/// * `command`: The command to execute.
+/// * `timeout`: Optional timeout for the command execution.
+///
+/// ### `sftp`
+///
+/// Creates an `AsyncSftpClient` instance for SFTP operations.
+///
+/// ### `shell`
+///
+/// Creates an `AsyncInteractiveShell` instance. It takes the following parameter:
+///
+/// * `pty`: Whether to request a pseudo-terminal for the shell.
+///
+/// ### `tail`
+///
+/// Creates an `AsyncFileTailer` instance for tailing a remote file. It takes the following parameter:
+///
+/// * `remote_file`: The path to the remote file to tail.
+///
+/// ### `connect`
+///
+/// Explicitly connects to the SSH server. Usually not needed as connection happens automatically in context managers.
+///
+/// ### `close`
+///
+/// Closes the SSH connection.
+///
 #[pyclass]
 #[derive(Clone)]
 pub struct AsyncConnection {
@@ -42,12 +168,13 @@ pub struct AsyncConnection {
     // Wrap Handle in Arc because it might not be Clone
     session: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
     config: Arc<Config>,
+    timeout: u64,
 }
 
 #[pymethods]
 impl AsyncConnection {
     #[new]
-    #[pyo3(signature = (host, username=None, password=None, key_path=None, port=22, keepalive_interval=0))]
+    #[pyo3(signature = (host, username=None, password=None, key_path=None, port=22, keepalive_interval=0, timeout=0))]
     fn new(
         host: String,
         username: Option<String>,
@@ -55,6 +182,7 @@ impl AsyncConnection {
         key_path: Option<String>,
         port: u16,
         keepalive_interval: u64,
+        timeout: u64,
     ) -> Self {
         let mut config = Config::default();
         if keepalive_interval > 0 {
@@ -69,10 +197,12 @@ impl AsyncConnection {
             key_path,
             session: Arc::new(Mutex::new(None)),
             config: Arc::new(config),
+            timeout,
         }
     }
 
-    fn connect<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (timeout=None))]
+    fn connect<'p>(&self, py: Python<'p>, timeout: Option<u64>) -> PyResult<Bound<'p, PyAny>> {
         let config = self.config.clone();
         let host = self.host.clone();
         let port = self.port;
@@ -80,94 +210,133 @@ impl AsyncConnection {
         let password = self.password.clone();
         let key_path = self.key_path.clone();
         let session_arc = self.session.clone();
+        let timeout = timeout.unwrap_or(self.timeout);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handler = ClientHandler {};
-            let mut session = russh::client::connect(config, (host.as_str(), port), handler)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
-
-            // Authentication
-            let auth_res = if let Some(key_p) = key_path {
-                let key_path = Path::new(&key_p);
-                let key_pair = russh_keys::load_secret_key(key_path, None)
-                    .map_err(|e| PyRuntimeError::new_err(format!("Failed to load key: {}", e)))?;
-                session
-                    .authenticate_publickey(&username, Arc::new(key_pair))
+            let run = async {
+                let handler = ClientHandler {};
+                let mut session = russh::client::connect(config, (host.as_str(), port), handler)
                     .await
-            } else if let Some(pwd) = password {
-                session.authenticate_password(&username, pwd).await
-            } else {
-                // Try no-auth or agent? For now, fail if no auth provided
-                return Err(PyValueError::new_err("No authentication method provided"));
+                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
+
+                // Authentication
+                let auth_res = if let Some(key_p) = key_path {
+                    let key_p = shellexpand::full(&key_p)
+                        .map(|p| p.into_owned())
+                        .unwrap_or(key_p);
+                    let key_path = Path::new(&key_p);
+                    let key_pair = russh_keys::load_secret_key(key_path, password.as_deref())
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Failed to load key: {}", e))
+                        })?;
+                    session
+                        .authenticate_publickey(&username, Arc::new(key_pair))
+                        .await
+                } else if let Some(pwd) = password {
+                    session.authenticate_password(&username, pwd).await
+                } else {
+                    // Try no-auth or agent? For now, fail if no auth provided
+                    return Err(PyValueError::new_err("No authentication method provided"));
+                };
+
+                if let Err(e) = auth_res {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Authentication failed: {}",
+                        e
+                    )));
+                }
+
+                if !auth_res.unwrap() {
+                    return Err(PyRuntimeError::new_err("Authentication failed"));
+                }
+
+                let mut guard = session_arc.lock().await;
+                *guard = Some(Arc::new(session));
+
+                Ok(())
             };
 
-            if let Err(e) = auth_res {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Authentication failed: {}",
-                    e
-                )));
+            if timeout > 0 {
+                match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
+                    Ok(res) => res,
+                    Err(_) => Err(PyTimeoutError::new_err("Connection timed out")),
+                }
+            } else {
+                run.await
             }
-
-            if !auth_res.unwrap() {
-                return Err(PyRuntimeError::new_err("Authentication failed"));
-            }
-
-            let mut guard = session_arc.lock().await;
-            *guard = Some(Arc::new(session));
-
-            Ok(())
         })
     }
 
-    fn execute<'p>(&self, py: Python<'p>, command: String) -> PyResult<Bound<'p, PyAny>> {
+    #[pyo3(signature = (command, timeout=None))]
+    fn execute<'p>(
+        &self,
+        py: Python<'p>,
+        command: String,
+        timeout: Option<u64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let session_arc = self.session.clone();
+        let timeout = timeout.unwrap_or(0);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = session_arc.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+            let run = async {
+                let guard = session_arc.lock().await;
+                let session = guard
+                    .as_ref()
+                    .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
 
-            // Clone the Arc<Handle>
-            let session = session.clone();
-            drop(guard);
+                // Clone the Arc<Handle>
+                let session = session.clone();
+                drop(guard);
 
-            let mut channel = session
-                .channel_open_session()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let mut channel = session
+                    .channel_open_session()
+                    .await
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            channel
-                .exec(true, command)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                channel
+                    .exec(true, command)
+                    .await
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let mut exit_code = 0;
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let mut exit_code = 0;
 
-            while let Some(msg) = channel.wait().await {
-                match msg {
-                    russh::ChannelMsg::Data { ref data } => {
-                        stdout.extend_from_slice(data);
-                    }
-                    russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                        if ext == 1 {
-                            stderr.extend_from_slice(data);
+                while let Some(msg) = channel.wait().await {
+                    match msg {
+                        russh::ChannelMsg::Data { ref data } => {
+                            stdout.extend_from_slice(data);
                         }
+                        russh::ChannelMsg::ExtendedData { ref data, ext } => {
+                            if ext == 1 {
+                                stderr.extend_from_slice(data);
+                            }
+                        }
+                        russh::ChannelMsg::ExitStatus { exit_status } => {
+                            exit_code = exit_status;
+                        }
+                        _ => {}
                     }
-                    russh::ChannelMsg::ExitStatus { exit_status } => {
-                        exit_code = exit_status;
-                    }
-                    _ => {}
                 }
+
+                let stdout_str = String::from_utf8_lossy(&stdout).to_string();
+                let stderr_str = String::from_utf8_lossy(&stderr).to_string();
+
+                Ok(SSHResult {
+                    stdout: stdout_str,
+                    stderr: stderr_str,
+                    status: exit_code as i32,
+                })
+            };
+
+            if timeout > 0 {
+                match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
+                    Ok(res) => res,
+                    Err(_) => Err(PyTimeoutError::new_err("Command timed out")),
+                }
+            } else {
+                run.await
             }
-
-            let stdout_str = String::from_utf8_lossy(&stdout).to_string();
-            let stderr_str = String::from_utf8_lossy(&stderr).to_string();
-
-            Ok((stdout_str, stderr_str, exit_code))
         })
     }
 
@@ -188,43 +357,60 @@ impl AsyncConnection {
         let password = slf.password.clone();
         let key_path = slf.key_path.clone();
         let session_arc = slf.session.clone();
+        let timeout = slf.timeout;
 
         let py_self = Bound::new(py, (*slf).clone())?.into_any().unbind();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handler = ClientHandler {};
-            let mut session = russh::client::connect(config, (host.as_str(), port), handler)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
-
-            // Auth ...
-            let auth_res = if let Some(key_p) = key_path {
-                let key_path = Path::new(&key_p);
-                let key_pair = russh_keys::load_secret_key(key_path, None)
-                    .map_err(|e| PyRuntimeError::new_err(format!("Failed to load key: {}", e)))?;
-                session
-                    .authenticate_publickey(&username, Arc::new(key_pair))
+            let run = async {
+                let handler = ClientHandler {};
+                let mut session = russh::client::connect(config, (host.as_str(), port), handler)
                     .await
-            } else if let Some(pwd) = password {
-                session.authenticate_password(&username, pwd).await
-            } else {
-                return Err(PyValueError::new_err("No authentication method provided"));
+                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
+
+                // Auth ...
+                let auth_res = if let Some(key_p) = key_path {
+                    let key_p = shellexpand::full(&key_p)
+                        .map(|p| p.into_owned())
+                        .unwrap_or(key_p);
+                    let key_path = Path::new(&key_p);
+                    let key_pair = russh_keys::load_secret_key(key_path, password.as_deref())
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Failed to load key: {}", e))
+                        })?;
+                    session
+                        .authenticate_publickey(&username, Arc::new(key_pair))
+                        .await
+                } else if let Some(pwd) = password {
+                    session.authenticate_password(&username, pwd).await
+                } else {
+                    return Err(PyValueError::new_err("No authentication method provided"));
+                };
+
+                if let Err(e) = auth_res {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Authentication failed: {}",
+                        e
+                    )));
+                }
+                if !auth_res.unwrap() {
+                    return Err(PyRuntimeError::new_err("Authentication failed"));
+                }
+
+                let mut guard = session_arc.lock().await;
+                *guard = Some(Arc::new(session));
+
+                Ok(py_self)
             };
 
-            if let Err(e) = auth_res {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Authentication failed: {}",
-                    e
-                )));
+            if timeout > 0 {
+                match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
+                    Ok(res) => res,
+                    Err(_) => Err(PyTimeoutError::new_err("Connection timed out")),
+                }
+            } else {
+                run.await
             }
-            if !auth_res.unwrap() {
-                return Err(PyRuntimeError::new_err("Authentication failed"));
-            }
-
-            let mut guard = session_arc.lock().await;
-            *guard = Some(Arc::new(session));
-
-            Ok(py_self)
         })
     }
 
@@ -317,6 +503,32 @@ impl AsyncConnection {
     }
 }
 
+/// # AsyncSftpClient
+///
+/// `AsyncSftpClient` is an asynchronous class for performing SFTP operations over an SSH connection.
+///
+/// ## Methods
+///
+/// ### `list`
+///
+/// Lists the contents of a remote directory. It takes the following parameter:
+///
+/// * `path`: The path to the remote directory to list.
+///
+/// ### `get`
+///
+/// Downloads a file from the remote server to the local machine. It takes the following parameters:
+///
+/// * `remote_path`: The path to the file on the remote server.
+/// * `local_path`: The path where to save the file on the local machine.
+///
+/// ### `put`
+///
+/// Uploads a file from the local machine to the remote server. It takes the following parameters:
+///
+/// * `local_path`: The path to the file on the local machine.
+/// * `remote_path`: The path where to save the file on the remote server.
+///
 #[pyclass]
 pub struct AsyncSftpClient {
     client: Arc<SftpSession>,
@@ -426,6 +638,27 @@ impl AsyncSftpClient {
     }
 }
 
+/// # AsyncInteractiveShell
+///
+/// `AsyncInteractiveShell` is an asynchronous class that represents an interactive shell over an SSH connection. It includes methods for sending commands and reading the output.
+///
+/// ## Methods
+///
+/// ### `send`
+///
+/// Sends a command to the shell. It takes the following parameters:
+///
+/// * `data`: The command to send.
+/// * `add_newline`: Whether to add a newline at the end of the command (default: true).
+///
+/// ### `read`
+///
+/// Reads the output from the shell and returns an `SSHResult`.
+///
+/// ### `close`
+///
+/// Closes the shell.
+///
 #[pyclass]
 #[derive(Clone)]
 pub struct AsyncInteractiveShell {
@@ -463,22 +696,35 @@ impl AsyncInteractiveShell {
         let channel = self.channel.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = channel.lock().await;
-            let mut buffer = Vec::new();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
 
             // First, wait for at least one data packet (ignoring non-data packets)
             loop {
                 match tokio::time::timeout(std::time::Duration::from_secs(2), guard.wait()).await {
                     Ok(Some(russh::ChannelMsg::Data { data })) => {
-                        buffer.extend_from_slice(&data);
+                        stdout.extend_from_slice(&data);
                         break;
                     }
                     Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
-                        buffer.extend_from_slice(&data);
+                        stderr.extend_from_slice(&data);
                         break;
                     }
                     Ok(Some(_)) => continue, // Ignore other events
-                    Ok(None) => return Ok(String::new()), // Channel closed
-                    Err(_) => return Ok(String::new()), // Timeout waiting for first packet
+                    Ok(None) => {
+                        return Ok(SSHResult {
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            status: 0,
+                        })
+                    } // Channel closed
+                    Err(_) => {
+                        return Ok(SSHResult {
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            status: 0,
+                        })
+                    } // Timeout waiting for first packet
                 }
             }
 
@@ -487,10 +733,10 @@ impl AsyncInteractiveShell {
                 match tokio::time::timeout(std::time::Duration::from_millis(50), guard.wait()).await
                 {
                     Ok(Some(russh::ChannelMsg::Data { data })) => {
-                        buffer.extend_from_slice(&data);
+                        stdout.extend_from_slice(&data);
                     }
                     Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
-                        buffer.extend_from_slice(&data);
+                        stderr.extend_from_slice(&data);
                     }
                     Ok(Some(_)) => continue,
                     Ok(None) => break,
@@ -498,7 +744,11 @@ impl AsyncInteractiveShell {
                 }
             }
 
-            Ok(String::from_utf8_lossy(&buffer).to_string())
+            Ok(SSHResult {
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                stderr: String::from_utf8_lossy(&stderr).to_string(),
+                status: 0,
+            })
         })
     }
 
@@ -537,6 +787,27 @@ struct TailerState {
     contents: Option<String>,
 }
 
+/// # AsyncFileTailer
+///
+/// `AsyncFileTailer` is an asynchronous class for tailing remote files over SFTP. It maintains an SFTP connection and allows reading from a specified position in a remote file.
+///
+/// ## Attributes
+///
+/// * `remote_file`: The path to the remote file.
+/// * `contents`: The contents read from the file (available after exiting the context manager).
+///
+/// ## Methods
+///
+/// ### `seek_end`
+///
+/// Seeks to the end of the remote file and returns the file size.
+///
+/// ### `read`
+///
+/// Reads the contents of the remote file from a given position. It takes the following parameter:
+///
+/// * `from_pos`: Optional position to start reading from (default: last read position).
+///
 #[pyclass]
 #[derive(Clone)]
 pub struct AsyncFileTailer {
@@ -682,9 +953,7 @@ impl AsyncFileTailer {
 
     #[getter]
     fn contents(&self) -> PyResult<Option<String>> {
-        match self.state.try_lock() {
-            Ok(guard) => Ok(guard.contents.clone()),
-            Err(_) => Err(PyRuntimeError::new_err("Could not acquire lock")),
-        }
+        let guard = self.state.blocking_lock();
+        Ok(guard.contents.clone())
     }
 }
