@@ -238,7 +238,7 @@ async with AsyncConnection(host="my.test.server", username="user", password="pas
 ```
 
 # Disclaimer
-This is an early project that should not be used in sentitive production code!
+This is an early project that should not be used in sensitive production code!
 There isn't full exception handling, so expect some Rust panics to fall through.
 With that said, try it out and let me know your thoughts!
 
