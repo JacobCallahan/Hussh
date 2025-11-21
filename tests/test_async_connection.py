@@ -133,7 +133,6 @@ async def test_async_key_in_user_home(run_test_server):
     new_path.parent.mkdir(exist_ok=True)
     if new_path.exists():
         new_path.unlink()
-    key_path.read_bytes()
     new_path.write_bytes(key_path.read_bytes())
     try:
         async with AsyncConnection(
