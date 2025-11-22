@@ -724,23 +724,28 @@ impl InteractiveShell {
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         if self.pty {
-            self.send("exit\n".to_string(), Some(false)).unwrap();
+            self.send("exit\n".to_string(), Some(false))?;
         }
         // Try the normal read flow first (for commands that complete normally)
         match self.read() {
             Ok(result) => {
                 self.result = Some(result);
             }
-            Err(_) => {
-                // If read fails (most commonly due to timeout from a long-running command,
-                // but could also be other I/O errors), we set an empty result to allow
-                // the context manager to exit cleanly. The channel should already be closed
-                // by the read() method's error handler.
-                self.result = Some(SSHResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    status: -1,
-                });
+            Err(e) => {
+                // Check if this is a timeout error (expected for long-running commands)
+                // by examining the error string
+                let error_msg = e.to_string();
+                if error_msg.contains("Timeout") || error_msg.contains("timeout") {
+                    // Timeout error - set an empty result to allow clean exit
+                    self.result = Some(SSHResult {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        status: -1,
+                    });
+                } else {
+                    // Other I/O errors - propagate them as they may indicate unexpected issues
+                    return Err(e);
+                }
             }
         }
         Ok(())
