@@ -73,28 +73,47 @@ def run_second_server(ensure_test_server_image):
 @pytest.fixture(scope="session")
 def setup_agent_auth():
     # Define the key paths
-    base_key = TESTDIR / "data/test_key"
-    auth_key = TESTDIR / "data/auth_test_key"
+    from pathlib import Path
+
+    base_key = Path(TESTDIR / "data/test_key")
+    auth_key = Path(TESTDIR / "data/auth_test_key")
+
+    # Ensure proper permissions on the keys
+    base_key.chmod(0o600)
+    auth_key.chmod(0o600)
 
     # Start the ssh-agent and get the environment variables
     output = subprocess.check_output(["ssh-agent", "-s"])
-    env = dict(line.split("=", 1) for line in output.decode().splitlines() if "=" in line)
+    env = {}
+    for line in output.decode().splitlines():
+        if "=" in line and not line.startswith("echo"):
+            key, value = line.split("=", 1)
+            # Strip trailing semicolons and 'export' suffix
+            value = value.split(";")[0].strip()
+            env[key.strip()] = value
 
     # Set the SSH_AUTH_SOCK and SSH_AGENT_PID environment variables
     os.environ["SSH_AUTH_SOCK"] = env["SSH_AUTH_SOCK"]
     os.environ["SSH_AGENT_PID"] = env["SSH_AGENT_PID"]
 
     # Add the keys to the ssh-agent
-    # subprocess.run(["ssh-add", str(base_key)], check=True)
     result = subprocess.run(
         ["ssh-add", str(base_key)], capture_output=True, text=True, check=False
     )
-    print(result.stdout)
-    print(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to add key to agent: {result.stderr}")
+
     # The auth_key is password protected
     child = pexpect.spawn("ssh-add", [str(auth_key)])
     child.expect("Enter passphrase for .*: ")
     child.sendline("husshpuppy")
+    child.expect(pexpect.EOF)
+    child.close()
+    if child.exitstatus != 0:
+        raise RuntimeError("Failed to add password-protected key to agent")
+
     yield
+
     # Kill the ssh-agent after the tests have run
-    subprocess.run(["ssh-agent", "-k"], check=True)
+    agent_pid = env["SSH_AGENT_PID"]
+    subprocess.run(["kill", agent_pid], check=False)

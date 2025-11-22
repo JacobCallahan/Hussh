@@ -1,5 +1,6 @@
 """Tests for hussh.connection module."""
 
+import os
 from pathlib import Path
 import shutil
 import time
@@ -51,10 +52,14 @@ def test_key_with_password_auth():
     )
 
 
-@pytest.mark.skip("fixture-based setup for agent-based auth currently not working")
 def test_agent_auth(setup_agent_auth):
     """Test that we can establish a connection with agent-based authentication."""
-    assert Connection(host="localhost", port=8022)
+    conn = Connection(host="localhost", port=8022)
+    assert conn is not None
+    # Test that we can actually execute a command to confirm auth worked
+    result = conn.execute("echo 'agent auth test'")
+    assert result.status == 0
+    assert "agent auth test" in result.stdout
 
 
 def test_default_key_auth():
@@ -99,8 +104,13 @@ def test_no_default_keys_auth_failure():
     if ssh_exists:
         ssh_dir.rename(backup_dir)
 
+    # Also unset SSH_AUTH_SOCK to disable any existing ssh-agent
+    old_ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK")
+    if old_ssh_auth_sock:
+        del os.environ["SSH_AUTH_SOCK"]
+
     try:
-        # This should fail since there are no default keys and likely no ssh-agent
+        # This should fail since there are no default keys and no ssh-agent
         with pytest.raises(
             AuthenticationError, match="Failed to authenticate with ssh-agent and default SSH keys"
         ):
@@ -109,6 +119,9 @@ def test_no_default_keys_auth_failure():
         # Restore the .ssh directory if it existed
         if ssh_exists and backup_dir.exists():
             backup_dir.rename(ssh_dir)
+        # Restore SSH_AUTH_SOCK if it was set
+        if old_ssh_auth_sock:
+            os.environ["SSH_AUTH_SOCK"] = old_ssh_auth_sock
 
 
 def test_basic_command(conn):
