@@ -726,7 +726,21 @@ impl InteractiveShell {
         if self.pty {
             self.send("exit\n".to_string(), Some(false)).unwrap();
         }
-        self.result = Some(self.read()?);
+        // Try the normal read flow first (for commands that complete normally)
+        match self.read() {
+            Ok(result) => {
+                self.result = Some(result);
+            }
+            Err(_) => {
+                // If read fails (timeout from long-running command), set an empty result.
+                // The channel should already be closed by the read() error handler.
+                self.result = Some(SSHResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    status: -1,
+                });
+            }
+        }
         Ok(())
     }
 }
