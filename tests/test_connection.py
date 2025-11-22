@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import shutil
+import time
 
 import pytest
 
@@ -237,7 +238,6 @@ def test_pty_shell_context(conn):
 
 def test_hangup_shell_context():
     """Test that we can hang up a running shell while a previous command is still running."""
-    import time
     # Create a connection with a 3000ms (3 second) timeout so it doesn't wait forever
     conn = Connection(host="localhost", port=8022, password="toor", timeout=3000)
     with conn.shell() as sh:
