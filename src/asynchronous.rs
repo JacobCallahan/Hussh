@@ -293,7 +293,7 @@ impl AsyncConnection {
                                 "Authentication failed"
                             } else {
                                 "Failed to authenticate with default SSH keys"
-                            }
+                            },
                         ));
                     }
                     Err(e) => {
@@ -452,7 +452,7 @@ impl AsyncConnection {
                                 "Authentication failed"
                             } else {
                                 "Failed to authenticate with default SSH keys"
-                            }
+                            },
                         ));
                     }
                     Err(e) => {
