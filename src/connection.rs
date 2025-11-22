@@ -732,8 +732,10 @@ impl InteractiveShell {
                 self.result = Some(result);
             }
             Err(_) => {
-                // If read fails (timeout from long-running command), set an empty result.
-                // The channel should already be closed by the read() error handler.
+                // If read fails (most commonly due to timeout from a long-running command,
+                // but could also be other I/O errors), we set an empty result to allow
+                // the context manager to exit cleanly. The channel should already be closed
+                // by the read() method's error handler.
                 self.result = Some(SSHResult {
                     stdout: String::new(),
                     stderr: String::new(),
