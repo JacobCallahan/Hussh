@@ -106,7 +106,7 @@ async fn try_default_keys(
         "~/.ssh/id_rsa",     // RSA keys (most common)
         "~/.ssh/id_ed25519", // Ed25519 keys (modern, secure)
         "~/.ssh/id_ecdsa",   // ECDSA keys
-        "~/.ssh/id_dsa",     // DSA keys (legacy)
+        "~/.ssh/id_dsa",     // DSA keys (legacy, deprecated but included for compatibility)
     ];
 
     for key_path in &default_keys {
@@ -116,14 +116,15 @@ async fn try_default_keys(
         let path = Path::new(&expanded_key_path);
 
         if path.exists() {
+            // Try to load and use this key
             if let Ok(key_pair) = russh_keys::load_secret_key(path, password) {
                 match session
                     .authenticate_publickey(username, Arc::new(key_pair))
                     .await
                 {
                     Ok(true) => return Ok(true),
-                    Ok(false) => continue, // Try next key
-                    Err(_) => continue,    // Try next key
+                    // Authentication failed with this key, try next one
+                    Ok(false) | Err(_) => continue,
                 }
             }
         }
