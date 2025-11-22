@@ -1,7 +1,7 @@
 """Common setup for Hussh tests."""
 
 import os
-from pathlib import PurePath
+from pathlib import Path, PurePath
 import subprocess
 import time
 
@@ -73,8 +73,6 @@ def run_second_server(ensure_test_server_image):
 @pytest.fixture(scope="session")
 def setup_agent_auth():
     # Define the key paths
-    from pathlib import Path
-
     base_key = Path(TESTDIR / "data/test_key")
     auth_key = Path(TESTDIR / "data/auth_test_key")
 
@@ -116,4 +114,6 @@ def setup_agent_auth():
 
     # Kill the ssh-agent after the tests have run
     agent_pid = env["SSH_AGENT_PID"]
-    subprocess.run(["kill", agent_pid], check=False)
+    result = subprocess.run(["kill", agent_pid], check=False, capture_output=True)
+    if result.returncode != 0:
+        print(f"Warning: Failed to kill ssh-agent (PID {agent_pid}): {result.stderr.decode()}")

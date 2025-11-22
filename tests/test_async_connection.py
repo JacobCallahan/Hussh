@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -159,7 +160,7 @@ async def test_async_default_key_auth(run_test_server):
         pytest.skip("Default SSH key already exists, skipping test to avoid conflicts")
 
     # Copy the test key to the default location
-    default_key_path.write_bytes(key_path.read_bytes())
+    shutil.copy2(key_path, default_key_path)
     default_key_path.chmod(0o600)  # Set correct permissions for SSH key
 
     try:

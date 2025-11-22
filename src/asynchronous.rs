@@ -33,7 +33,7 @@
 //! asyncio.run(main())
 //! ```
 //!
-//! Multiple forms of authentication are supported. You can use a password, a private key, or default SSH authentication (default keys).
+//! Multiple forms of authentication are supported. You can use a password, a private key, or default SSH key files (ssh-agent is not supported in async connections).
 //!
 //! ```python
 //! async with AsyncConnection("my.test.server", username="user", key_path="~/.ssh/id_rsa") as conn:
@@ -97,6 +97,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 /// Helper function to try default SSH key files
+/// Note: password parameter is reserved for future support of password-protected default keys
 async fn try_default_keys(
     session: &mut russh::client::Handle<ClientHandler>,
     username: &str,
@@ -110,9 +111,7 @@ async fn try_default_keys(
     ];
 
     for key_path in &default_keys {
-        let expanded_key_path = shellexpand::full(key_path)
-            .map(|p| p.into_owned())
-            .unwrap_or_else(|_| key_path.to_string());
+        let expanded_key_path = shellexpand::tilde(key_path).into_owned();
         let path = Path::new(&expanded_key_path);
 
         if path.exists() {
@@ -265,7 +264,7 @@ impl AsyncConnection {
                     .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
 
                 // Authentication
-                let auth_res = if let Some(key_p) = key_path {
+                let auth_res = if let Some(key_p) = key_path.clone() {
                     let key_p = shellexpand::full(&key_p)
                         .map(|p| p.into_owned())
                         .unwrap_or(key_p);
@@ -277,7 +276,7 @@ impl AsyncConnection {
                     session
                         .authenticate_publickey(&username, Arc::new(key_pair))
                         .await
-                } else if let Some(pwd) = password {
+                } else if let Some(pwd) = password.clone() {
                     session.authenticate_password(&username, pwd).await
                 } else {
                     // If no authentication method provided, try default SSH key files
@@ -290,7 +289,11 @@ impl AsyncConnection {
                     }
                     Ok(false) => {
                         return Err(PyRuntimeError::new_err(
-                            "Failed to authenticate with default SSH keys",
+                            if key_path.is_some() || password.is_some() {
+                                "Authentication failed"
+                            } else {
+                                "Failed to authenticate with default SSH keys"
+                            }
                         ));
                     }
                     Err(e) => {
@@ -420,7 +423,7 @@ impl AsyncConnection {
                     .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
 
                 // Auth ...
-                let auth_res = if let Some(key_p) = key_path {
+                let auth_res = if let Some(key_p) = key_path.clone() {
                     let key_p = shellexpand::full(&key_p)
                         .map(|p| p.into_owned())
                         .unwrap_or(key_p);
@@ -432,7 +435,7 @@ impl AsyncConnection {
                     session
                         .authenticate_publickey(&username, Arc::new(key_pair))
                         .await
-                } else if let Some(pwd) = password {
+                } else if let Some(pwd) = password.clone() {
                     session.authenticate_password(&username, pwd).await
                 } else {
                     // If no authentication method provided, try default SSH key files
@@ -445,7 +448,11 @@ impl AsyncConnection {
                     }
                     Ok(false) => {
                         return Err(PyRuntimeError::new_err(
-                            "Failed to authenticate with default SSH keys",
+                            if key_path.is_some() || password.is_some() {
+                                "Authentication failed"
+                            } else {
+                                "Failed to authenticate with default SSH keys"
+                            }
                         ));
                     }
                     Err(e) => {
