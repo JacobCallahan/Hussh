@@ -25,7 +25,7 @@ with memray.Tracker("memray-bench_ssh2-python.bin"):
 
     results_dict["import_time"] = f"{(timeit.default_timer() - start_time) * 1000:.2f} ms"
 
-    host_info = json.loads(Path("target.json").read_text())
+    host_info = json.loads((Path(__file__).parent / "target.json").read_text())
 
     # connect to the server
     temp_time = timeit.default_timer()
