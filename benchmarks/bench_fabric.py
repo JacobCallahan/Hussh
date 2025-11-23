@@ -22,7 +22,7 @@ with memray.Tracker("memray-bench_fabric.bin", native_traces=True, follow_fork=T
     from fabric import Connection
 
     results_dict["import_time"] = f"{(timeit.default_timer() - start_time) * 1000:.2f} ms"
-    host_info = json.loads(Path("target.json").read_text())
+    host_info = json.loads((Path(__file__).parent / "target.json").read_text())
 
     temp_time = timeit.default_timer()
     conn = Connection(

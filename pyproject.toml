@@ -45,6 +45,15 @@ dev = [
     "pytest-asyncio",
     "pytest-randomly",
     "ruff",
+    "tox",
+    "tox-uv",
+]
+test = [
+    "docker",
+    "pexpect",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-randomly",
 ]
 
 [tool.maturin]

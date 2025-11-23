@@ -1,9 +1,12 @@
 # requirements for benchmarking common ssh libraries
-hussh
+# hussh - should be installed in editable mode for benchmarking
 fabric  # also fulfills paramiko
 # pylibssh
 ssh2-python
 asyncssh
+
+# used for spinning up temporary ssh servers for benchmarking
+docker
 
 # used for benchmarking memory usage
 memray
