@@ -33,7 +33,7 @@
 //! asyncio.run(main())
 //! ```
 //!
-//! Multiple forms of authentication are supported. You can use a password or a private key.
+//! Multiple forms of authentication are supported. You can use a password, a private key, or default SSH key files (ssh-agent is not supported in async connections).
 //!
 //! ```python
 //! async with AsyncConnection("my.test.server", username="user", key_path="~/.ssh/id_rsa") as conn:
@@ -41,7 +41,16 @@
 //!
 //! async with AsyncConnection("my.test.server", username="user", password="pass") as conn:
 //!     result = await conn.execute("ls")
+//!
+//! async with AsyncConnection("my.test.server", username="user") as conn:  # Uses default SSH keys
+//!     result = await conn.execute("ls")
 //! ```
+//!
+//! When no password or key_path is specified, the connection will attempt authentication using default SSH key files:
+//! - ~/.ssh/id_rsa (RSA keys, most common)
+//! - ~/.ssh/id_ed25519 (Ed25519 keys, modern and secure)
+//! - ~/.ssh/id_ecdsa (ECDSA keys)
+//! - ~/.ssh/id_dsa (DSA keys, legacy)
 //!
 //! To use the interactive shell, it is recommended to use the shell() context manager from the AsyncConnection class.
 //! You can send commands to the shell using the `send` method, then get the results from the `read` method.
@@ -78,7 +87,7 @@
 
 use crate::connection::SSHResult;
 use async_trait::async_trait;
-use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
 use russh_sftp::client::SftpSession;
@@ -86,6 +95,41 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+
+/// Helper function to try default SSH key files
+/// Note: password parameter is reserved for future support of password-protected default keys
+async fn try_default_keys(
+    session: &mut russh::client::Handle<ClientHandler>,
+    username: &str,
+    password: Option<&str>,
+) -> Result<bool, russh::Error> {
+    let default_keys = [
+        "~/.ssh/id_rsa",     // RSA keys (most common)
+        "~/.ssh/id_ed25519", // Ed25519 keys (modern, secure)
+        "~/.ssh/id_ecdsa",   // ECDSA keys
+        "~/.ssh/id_dsa",     // DSA keys (legacy, deprecated but included for compatibility)
+    ];
+
+    for key_path in &default_keys {
+        let expanded_key_path = shellexpand::tilde(key_path).into_owned();
+        let path = Path::new(&expanded_key_path);
+
+        if path.exists() {
+            // Try to load and use this key
+            if let Ok(key_pair) = russh_keys::load_secret_key(path, password) {
+                match session
+                    .authenticate_publickey(username, Arc::new(key_pair))
+                    .await
+                {
+                    Ok(true) => return Ok(true),
+                    // Authentication failed with this key, try next one
+                    Ok(false) | Err(_) => continue,
+                }
+            }
+        }
+    }
+    Ok(false) // No default keys worked
+}
 
 #[derive(Clone)]
 struct ClientHandler;
@@ -220,7 +264,7 @@ impl AsyncConnection {
                     .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
 
                 // Authentication
-                let auth_res = if let Some(key_p) = key_path {
+                let auth_res = if let Some(key_p) = key_path.clone() {
                     let key_p = shellexpand::full(&key_p)
                         .map(|p| p.into_owned())
                         .unwrap_or(key_p);
@@ -232,11 +276,11 @@ impl AsyncConnection {
                     session
                         .authenticate_publickey(&username, Arc::new(key_pair))
                         .await
-                } else if let Some(pwd) = password {
+                } else if let Some(pwd) = password.clone() {
                     session.authenticate_password(&username, pwd).await
                 } else {
-                    // Try no-auth or agent? For now, fail if no auth provided
-                    return Err(PyValueError::new_err("No authentication method provided"));
+                    // If no authentication method provided, try default SSH key files
+                    try_default_keys(&mut session, &username, None).await
                 };
 
                 match auth_res {
@@ -244,7 +288,13 @@ impl AsyncConnection {
                         // Authentication succeeded
                     }
                     Ok(false) => {
-                        return Err(PyRuntimeError::new_err("Authentication failed"));
+                        return Err(PyRuntimeError::new_err(
+                            if key_path.is_some() || password.is_some() {
+                                "Authentication failed"
+                            } else {
+                                "Failed to authenticate with default SSH keys"
+                            },
+                        ));
                     }
                     Err(e) => {
                         return Err(PyRuntimeError::new_err(format!(
@@ -373,7 +423,7 @@ impl AsyncConnection {
                     .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
 
                 // Auth ...
-                let auth_res = if let Some(key_p) = key_path {
+                let auth_res = if let Some(key_p) = key_path.clone() {
                     let key_p = shellexpand::full(&key_p)
                         .map(|p| p.into_owned())
                         .unwrap_or(key_p);
@@ -385,10 +435,11 @@ impl AsyncConnection {
                     session
                         .authenticate_publickey(&username, Arc::new(key_pair))
                         .await
-                } else if let Some(pwd) = password {
+                } else if let Some(pwd) = password.clone() {
                     session.authenticate_password(&username, pwd).await
                 } else {
-                    return Err(PyValueError::new_err("No authentication method provided"));
+                    // If no authentication method provided, try default SSH key files
+                    try_default_keys(&mut session, &username, None).await
                 };
 
                 match auth_res {
@@ -396,7 +447,13 @@ impl AsyncConnection {
                         // Authentication succeeded
                     }
                     Ok(false) => {
-                        return Err(PyRuntimeError::new_err("Authentication failed"));
+                        return Err(PyRuntimeError::new_err(
+                            if key_path.is_some() || password.is_some() {
+                                "Authentication failed"
+                            } else {
+                                "Failed to authenticate with default SSH keys"
+                            },
+                        ));
                     }
                     Err(e) => {
                         return Err(PyRuntimeError::new_err(format!(

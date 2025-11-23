@@ -39,7 +39,7 @@ def run_memray_reports(report_dict):
         # load the new json file
         results = json.loads(json_file.read_text())
         report_dict[lib]["peak_memory"] = (
-            f'{results["metadata"]["peak_memory"] / 1024 / 1024:.2f} MB'
+            f"{results['metadata']['peak_memory'] / 1024 / 1024:.2f} MB"
         )
         report_dict[lib]["allocations"] = str(results["metadata"]["total_allocations"])
         json_file.unlink()
