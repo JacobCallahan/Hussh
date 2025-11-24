@@ -22,7 +22,7 @@ russh = { version = "0.46", default-features = false, features = ["flate2"] }
 russh-sftp = "2.1"
 russh-keys = { version = "0.46", default-features = false }
 async-trait = "0.1"
-base64ct = "=1.6.0"
+base64ct = "=1.8.0"
 
 [profile.release]
 lto = true
