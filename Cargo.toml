@@ -20,7 +20,7 @@ pyo3-async-runtimes = { version = "0.26.0", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["full"] }
 russh = { version = "0.46", default-features = false, features = ["flate2"] }
 russh-sftp = "2.1"
-russh-keys = { version = "0.46", default-features = false }
+russh-keys = { version = "0.49", default-features = false }
 async-trait = "0.1"
 base64ct = "=1.8.0"
 
