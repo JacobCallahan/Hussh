@@ -18,11 +18,9 @@ pyo3 = { version = "0.26.0", features = ["generate-import-lib"] }
 shellexpand = "3.1.0"
 pyo3-async-runtimes = { version = "0.26.0", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["full"] }
-russh = { version = "0.54", default-features = false, features = ["flate2"] }
+russh = { version = "0.54", features = ["flate2", "async-trait"] }
 russh-sftp = "2.1"
-russh-keys = { version = "0.46", default-features = false }
 async-trait = "0.1"
-base64ct = "=1.8.0"
 
 [profile.release]
 lto = true

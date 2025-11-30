@@ -86,10 +86,10 @@
 //! ```
 
 use crate::connection::SSHResult;
-use async_trait::async_trait;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
+use russh::keys::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use std::path::Path;
 use std::sync::Arc;
@@ -116,14 +116,15 @@ async fn try_default_keys(
 
         if path.exists() {
             // Try to load and use this key
-            if let Ok(key_pair) = russh_keys::load_secret_key(path, password) {
+            if let Ok(key_pair) = russh::keys::load_secret_key(path, password) {
+                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
                 match session
-                    .authenticate_publickey(username, Arc::new(key_pair))
+                    .authenticate_publickey(username, key_with_hash)
                     .await
                 {
-                    Ok(true) => return Ok(true),
+                    Ok(auth_result) if auth_result.success() => return Ok(true),
                     // Authentication failed with this key, try next one
-                    Ok(false) | Err(_) => continue,
+                    Ok(_) | Err(_) => continue,
                 }
             }
         }
@@ -140,13 +141,12 @@ impl From<(russh::ChannelId, russh::ChannelMsg)> for ClientHandler {
     }
 }
 
-#[async_trait]
 impl Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        _server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
         // For now, we blindly accept keys (MVP).
         Ok(true)
@@ -269,15 +269,20 @@ impl AsyncConnection {
                         .map(|p| p.into_owned())
                         .unwrap_or(key_p);
                     let key_path = Path::new(&key_p);
-                    let key_pair = russh_keys::load_secret_key(key_path, password.as_deref())
+                    let key_pair = russh::keys::load_secret_key(key_path, password.as_deref())
                         .map_err(|e| {
                             PyRuntimeError::new_err(format!("Failed to load key: {}", e))
                         })?;
+                    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
                     session
-                        .authenticate_publickey(&username, Arc::new(key_pair))
+                        .authenticate_publickey(&username, key_with_hash)
                         .await
+                        .map(|r| r.success())
                 } else if let Some(pwd) = password.clone() {
-                    session.authenticate_password(&username, pwd).await
+                    session
+                        .authenticate_password(&username, pwd)
+                        .await
+                        .map(|r| r.success())
                 } else {
                     // If no authentication method provided, try default SSH key files
                     try_default_keys(&mut session, &username, None).await
@@ -428,15 +433,20 @@ impl AsyncConnection {
                         .map(|p| p.into_owned())
                         .unwrap_or(key_p);
                     let key_path = Path::new(&key_p);
-                    let key_pair = russh_keys::load_secret_key(key_path, password.as_deref())
+                    let key_pair = russh::keys::load_secret_key(key_path, password.as_deref())
                         .map_err(|e| {
                             PyRuntimeError::new_err(format!("Failed to load key: {}", e))
                         })?;
+                    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
                     session
-                        .authenticate_publickey(&username, Arc::new(key_pair))
+                        .authenticate_publickey(&username, key_with_hash)
                         .await
+                        .map(|r| r.success())
                 } else if let Some(pwd) = password.clone() {
-                    session.authenticate_password(&username, pwd).await
+                    session
+                        .authenticate_password(&username, pwd)
+                        .await
+                        .map(|r| r.success())
                 } else {
                     // If no authentication method provided, try default SSH key files
                     try_default_keys(&mut session, &username, None).await
