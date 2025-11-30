@@ -89,12 +89,24 @@ use crate::connection::SSHResult;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
-use russh::keys::PrivateKeyWithHashAlg;
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+
+/// Create a PrivateKeyWithHashAlg with the appropriate hash algorithm for the key type.
+/// For RSA keys, we use SHA-256 for modern server compatibility.
+/// For other key types (Ed25519, ECDSA), the hash algorithm is determined by the key type.
+fn create_key_with_hash(key: russh::keys::PrivateKey) -> PrivateKeyWithHashAlg {
+    let hash_alg = if key.algorithm().is_rsa() {
+        Some(HashAlg::Sha256)
+    } else {
+        None
+    };
+    PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg)
+}
 
 /// Helper function to try default SSH key files
 /// Note: password parameter is reserved for future support of password-protected default keys
@@ -117,7 +129,7 @@ async fn try_default_keys(
         if path.exists() {
             // Try to load and use this key
             if let Ok(key_pair) = russh::keys::load_secret_key(path, password) {
-                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
+                let key_with_hash = create_key_with_hash(key_pair);
                 match session
                     .authenticate_publickey(username, key_with_hash)
                     .await
@@ -273,7 +285,7 @@ impl AsyncConnection {
                         .map_err(|e| {
                             PyRuntimeError::new_err(format!("Failed to load key: {}", e))
                         })?;
-                    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
+                    let key_with_hash = create_key_with_hash(key_pair);
                     session
                         .authenticate_publickey(&username, key_with_hash)
                         .await
@@ -437,7 +449,7 @@ impl AsyncConnection {
                         .map_err(|e| {
                             PyRuntimeError::new_err(format!("Failed to load key: {}", e))
                         })?;
-                    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None);
+                    let key_with_hash = create_key_with_hash(key_pair);
                     session
                         .authenticate_publickey(&username, key_with_hash)
                         .await
