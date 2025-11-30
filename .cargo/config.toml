@@ -12,7 +12,7 @@
 #   export CFLAGS_armv7_unknown_linux_gnueabihf="-D__ARM_ARCH=7"
 #   export CFLAGS_armv7_unknown_linux_musleabihf="-D__ARM_ARCH=7"
 #
-# In the GitHub Actions workflow, add these to the before-script-linux section.
+# In GitHub Actions workflow, add these to the env section of the maturin-action step.
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = []
@@ -26,13 +26,10 @@ rustflags = []
 [target.armv7-unknown-linux-musleabihf]
 rustflags = []
 
-# Note: The [env] section only sets global environment variables, not per-target.
-# The CFLAGS_* variables below will be set globally which may not work correctly
-# for cross-compilation. They are included here for local builds but CI environments
-# should set these explicitly per target.
+# The [env] section sets environment variables during cargo builds.
+# These CFLAGS_* variables define __ARM_ARCH for the cc crate used by ring.
 [env]
 CFLAGS_aarch64_unknown_linux_gnu = "-D__ARM_ARCH=8"
 CFLAGS_aarch64_unknown_linux_musl = "-D__ARM_ARCH=8"
 CFLAGS_armv7_unknown_linux_gnueabihf = "-D__ARM_ARCH=7"
 CFLAGS_armv7_unknown_linux_musleabihf = "-D__ARM_ARCH=7"
-
