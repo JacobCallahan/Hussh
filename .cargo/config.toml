@@ -1,0 +1,35 @@
+# Cross-compilation settings for ARM targets
+# 
+# IMPORTANT: When cross-compiling for ARM targets, the ring crate requires
+# the __ARM_ARCH macro to be defined. This must be set as an environment 
+# variable BEFORE the build starts. Set these in your CI/shell:
+#
+# For aarch64 (ARM64):
+#   export CFLAGS_aarch64_unknown_linux_gnu="-D__ARM_ARCH=8"
+#   export CFLAGS_aarch64_unknown_linux_musl="-D__ARM_ARCH=8"
+#
+# For armv7:
+#   export CFLAGS_armv7_unknown_linux_gnueabihf="-D__ARM_ARCH=7"
+#   export CFLAGS_armv7_unknown_linux_musleabihf="-D__ARM_ARCH=7"
+#
+# In GitHub Actions workflow, add these to the env section of the maturin-action step.
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = []
+
+[target.aarch64-unknown-linux-musl]
+rustflags = []
+
+[target.armv7-unknown-linux-gnueabihf]
+rustflags = []
+
+[target.armv7-unknown-linux-musleabihf]
+rustflags = []
+
+# The [env] section sets environment variables during cargo builds.
+# These CFLAGS_* variables define __ARM_ARCH for the cc crate used by ring.
+[env]
+CFLAGS_aarch64_unknown_linux_gnu = "-D__ARM_ARCH=8"
+CFLAGS_aarch64_unknown_linux_musl = "-D__ARM_ARCH=8"
+CFLAGS_armv7_unknown_linux_gnueabihf = "-D__ARM_ARCH=7"
+CFLAGS_armv7_unknown_linux_musleabihf = "-D__ARM_ARCH=7"

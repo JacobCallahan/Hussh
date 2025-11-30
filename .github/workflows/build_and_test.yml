@@ -83,6 +83,11 @@ jobs:
         env:
           PKG_CONFIG_PATH: "/usr/share/miniconda/lib/pkgconfig/"
           OPENSSL_NO_VENDOR: 1
+          # Set CFLAGS for ARM cross-compilation to fix ring crate assembly issues
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
+          CFLAGS_aarch64_unknown_linux_musl: "-D__ARM_ARCH=8"
+          CFLAGS_armv7_unknown_linux_gnueabihf: "-D__ARM_ARCH=7"
+          CFLAGS_armv7_unknown_linux_musleabihf: "-D__ARM_ARCH=7"
         with:
           target: ${{ matrix.platform.target }}
           # args: --release --out dist --find-interpreter  <-- TODO: Add this back when maturin supports it
@@ -145,6 +150,11 @@ jobs:
         uses: PyO3/maturin-action@main
         env:
           PKG_CONFIG_PATH: "/usr/share/miniconda/lib/pkgconfig/"
+          # Set CFLAGS for ARM cross-compilation to fix ring crate assembly issues
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
+          CFLAGS_aarch64_unknown_linux_musl: "-D__ARM_ARCH=8"
+          CFLAGS_armv7_unknown_linux_gnueabihf: "-D__ARM_ARCH=7"
+          CFLAGS_armv7_unknown_linux_musleabihf: "-D__ARM_ARCH=7"
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 3.14 pypy3.9 pypy3.10
