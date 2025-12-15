@@ -40,7 +40,7 @@ jobs:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-sdist
           path: dist
@@ -107,7 +107,7 @@ jobs:
                 ln -s /usr/lib/libatomic.so.1 /usr/lib/libatomic.so
             fi
       - name: Upload wheels
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-linux-${{ matrix.platform.target }}
           path: dist
@@ -169,7 +169,7 @@ jobs:
                 apt update -y && apt-get install -y libssl-dev openssl pkg-config libatomic1
             fi
       - name: Upload wheels
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
           path: dist
@@ -213,7 +213,7 @@ jobs:
           args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 3.14
           sccache: 'true'
       - name: Upload wheels
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-windows-${{ matrix.platform.target }}
           path: dist
@@ -247,7 +247,7 @@ jobs:
           args: --release --out dist -i 3.8 3.9 3.10 3.11 3.12 3.13 3.14 pypy3.9 pypy3.10
           sccache: 'true'
       - name: Upload wheels
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist
