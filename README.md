@@ -203,16 +203,23 @@ async with AsyncConnection(host="my.test.server", timeout=10) as conn:
 ```
 
 ## SFTP
-Async SFTP operations are available through the `sftp()` method.
+Async SFTP operations are available directly on the connection, mirroring the synchronous API.
 ```python
 async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
-    sftp = await conn.sftp()
-    # Upload
-    await sftp.put(local_path="local.txt", remote_path="remote.txt")
-    # Download
-    await sftp.get(remote_path="remote.txt", local_path="downloaded.txt")
-    # List
-    files = await sftp.list(".")
+    # Write a local file to the remote server
+    await conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
+
+    # Write UTF-8 data to a remote file
+    await conn.sftp_write_data(data="Hello there!", remote_path="/dest/path/file")
+
+    # Read a remote file to a local destination
+    await conn.sftp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
+
+    # Read a remote file's contents as a string
+    contents = await conn.sftp_read(remote_path="/dest/path/file")
+
+    # List directory contents
+    files = await conn.sftp_list("/remote/path")
 ```
 
 ## Interactive Shell

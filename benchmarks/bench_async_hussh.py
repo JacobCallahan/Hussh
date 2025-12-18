@@ -43,38 +43,36 @@ async def _do_benchmark(task_id):
         await conn.execute("echo test")
         cmd_time = (time.time() - start) * 1000
 
-        sftp = await conn.sftp()
-
         # small file (1kb)
         start = time.time()
-        await sftp.put("1kb.txt", "/root/1kb.txt")
+        await conn.sftp_write("1kb.txt", "/root/1kb.txt")
         s_put_time = (time.time() - start) * 1000
 
         start = time.time()
         small_file = f"small_{task_id}.txt"
-        await sftp.get("/root/1kb.txt", small_file)
+        await conn.sftp_read("/root/1kb.txt", small_file)
         s_get_time = (time.time() - start) * 1000
         Path(small_file).unlink()
 
         # medium file (14kb)
         start = time.time()
-        await sftp.put("14kb.txt", "/root/14kb.txt")
+        await conn.sftp_write("14kb.txt", "/root/14kb.txt")
         m_put_time = (time.time() - start) * 1000
 
         start = time.time()
         medium_file = f"medium_{task_id}.txt"
-        await sftp.get("/root/14kb.txt", medium_file)
+        await conn.sftp_read("/root/14kb.txt", medium_file)
         m_get_time = (time.time() - start) * 1000
         Path(medium_file).unlink()
 
         # large file (64kb)
         start = time.time()
-        await sftp.put("64kb.txt", "/root/64kb.txt")
+        await conn.sftp_write("64kb.txt", "/root/64kb.txt")
         l_put_time = (time.time() - start) * 1000
 
         start = time.time()
         large_file = f"large_{task_id}.txt"
-        await sftp.get("/root/64kb.txt", large_file)
+        await conn.sftp_read("/root/64kb.txt", large_file)
         l_get_time = (time.time() - start) * 1000
         Path(large_file).unlink()
 

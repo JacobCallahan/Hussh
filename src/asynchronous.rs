@@ -8,9 +8,6 @@
 //! ### AsyncConnection
 //! An asynchronous class that represents an SSH connection. It provides methods for executing commands asynchronously, reading and writing files over SFTP, and creating an interactive shell.
 //!
-//! ### AsyncSftpClient
-//! An asynchronous class for SFTP operations, allowing listing directories, downloading, and uploading files.
-//!
 //! ### AsyncInteractiveShell
 //! An asynchronous class that represents an interactive shell over an SSH connection. It includes methods for sending commands and reading the output.
 //!
@@ -68,10 +65,20 @@
 //! For SFTP operations:
 //!
 //! ```python
-//! async with conn.sftp() as sftp:
-//!     files = await sftp.list("/remote/path")
-//!     await sftp.get("/remote/file", "/local/file")
-//!     await sftp.put("/local/file", "/remote/file")
+//! # Write a local file to the remote server
+//! await conn.sftp_write("/path/to/local/file", "/remote/path/file")
+//!
+//! # Write string data directly to a remote file
+//! await conn.sftp_write_data("Hello there!", "/remote/path/file")
+//!
+//! # Read a remote file to a local file
+//! await conn.sftp_read("/remote/path/file", "/local/path/file")
+//!
+//! # Read a remote file's contents as a string
+//! contents = await conn.sftp_read("/remote/path/file")
+//!
+//! # List directory contents
+//! files = await conn.sftp_list("/remote/path")
 //! ```
 //!
 //! For file tailing:
@@ -188,9 +195,32 @@ impl Handler for ClientHandler {
 /// * `command`: The command to execute.
 /// * `timeout`: Optional timeout for the command execution.
 ///
-/// ### `sftp`
+/// ### `sftp_read`
 ///
-/// Creates an `AsyncSftpClient` instance for SFTP operations.
+/// Reads a file over SFTP and returns the contents. It takes the following parameters:
+///
+/// * `remote_path`: The path to the file on the remote system.
+/// * `local_path`: The path to save the file on the local system. If not provided, the contents of the file are returned.
+///
+/// ### `sftp_write`
+///
+/// Writes a file over SFTP. It takes the following parameters:
+///
+/// * `local_path`: The path to the file on the local system.
+/// * `remote_path`: The path to save the file on the remote system. If not provided, the local path is used.
+///
+/// ### `sftp_write_data`
+///
+/// Writes data over SFTP. It takes the following parameters:
+///
+/// * `data`: The data to write.
+/// * `remote_path`: The path to save the data on the remote system.
+///
+/// ### `sftp_list`
+///
+/// Lists the contents of a remote directory. It takes the following parameter:
+///
+/// * `path`: The path to the remote directory to list.
 ///
 /// ### `shell`
 ///
@@ -223,8 +253,58 @@ pub struct AsyncConnection {
     // Use Arc<Mutex<>> to allow updating the session from the async block
     // Wrap Handle in Arc because it might not be Clone
     session: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
+    // Lazily initialized SFTP session, cached for reuse
+    sftp_session: Arc<Mutex<Option<Arc<SftpSession>>>>,
     config: Arc<Config>,
     timeout: u64,
+}
+
+// Private helper methods for AsyncConnection
+impl AsyncConnection {
+    /// Lazily initializes and returns the SFTP session, caching it for reuse
+    async fn get_or_init_sftp(
+        session_arc: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
+        sftp_arc: Arc<Mutex<Option<Arc<SftpSession>>>>,
+    ) -> PyResult<Arc<SftpSession>> {
+        // Check if we already have an SFTP session
+        {
+            let sftp_guard = sftp_arc.lock().await;
+            if let Some(sftp) = sftp_guard.as_ref() {
+                return Ok(sftp.clone());
+            }
+        }
+
+        // Need to create a new SFTP session
+        let session_guard = session_arc.lock().await;
+        let session = session_guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?
+            .clone();
+        drop(session_guard);
+
+        let channel = session
+            .channel_open_session()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to open channel: {}", e)))?;
+
+        channel.request_subsystem(true, "sftp").await.map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to request SFTP subsystem: {}", e))
+        })?;
+
+        let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to create SFTP session: {}", e))
+        })?;
+
+        let sftp = Arc::new(sftp);
+
+        // Cache the SFTP session
+        {
+            let mut sftp_guard = sftp_arc.lock().await;
+            *sftp_guard = Some(sftp.clone());
+        }
+
+        Ok(sftp)
+    }
 }
 
 #[pymethods]
@@ -252,6 +332,7 @@ impl AsyncConnection {
             password,
             key_path,
             session: Arc::new(Mutex::new(None)),
+            sftp_session: Arc::new(Mutex::new(None)),
             config: Arc::new(config),
             timeout,
         }
@@ -413,7 +494,10 @@ impl AsyncConnection {
 
     fn close<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let session_arc = self.session.clone();
+        let sftp_arc = self.sftp_session.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut sftp_guard = sftp_arc.lock().await;
+            *sftp_guard = None;
             let mut guard = session_arc.lock().await;
             *guard = None;
             Ok(())
@@ -512,33 +596,136 @@ impl AsyncConnection {
         self.close(py)
     }
 
-    fn sftp<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    /// Reads a file over SFTP and returns the contents.
+    /// If `local_path` is provided, the file is saved to the local system.
+    /// Otherwise, the contents of the file are returned as a string.
+    #[pyo3(signature = (remote_path, local_path=None))]
+    fn sftp_read<'p>(
+        &self,
+        py: Python<'p>,
+        remote_path: String,
+        local_path: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
         let session_arc = self.session.clone();
+        let sftp_arc = self.sftp_session.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = session_arc.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-            let session = session.clone();
-            drop(guard);
+            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
 
-            let channel = session
-                .channel_open_session()
+            let mut remote_file = sftp.open(&remote_path).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to open remote file: {}", e))
+            })?;
+
+            if let Some(local_p) = local_path {
+                // Save to local file
+                let mut local_file = tokio::fs::File::create(&local_p).await.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to create local file: {}", e))
+                })?;
+
+                let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
+                loop {
+                    let n = remote_file.read(&mut buffer).await.map_err(|e| {
+                        PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
+                    })?;
+                    if n == 0 {
+                        break;
+                    }
+                    local_file.write_all(&buffer[..n]).await.map_err(|e| {
+                        PyRuntimeError::new_err(format!("Failed to write local file: {}", e))
+                    })?;
+                }
+                Ok("Ok".to_string())
+            } else {
+                // Return contents as string
+                let mut buffer = Vec::new();
+                remote_file.read_to_end(&mut buffer).await.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
+                })?;
+                Ok(String::from_utf8_lossy(&buffer).to_string())
+            }
+        })
+    }
+
+    /// Writes a file over SFTP.
+    /// If `remote_path` is not provided, the local file is written to the same path on the remote system.
+    #[pyo3(signature = (local_path, remote_path=None))]
+    fn sftp_write<'p>(
+        &self,
+        py: Python<'p>,
+        local_path: String,
+        remote_path: Option<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let session_arc = self.session.clone();
+        let sftp_arc = self.sftp_session.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
+
+            let remote_p = remote_path.unwrap_or_else(|| local_path.clone());
+
+            let mut local_file = tokio::fs::File::open(&local_path).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to open local file: {}", e))
+            })?;
+
+            let mut remote_file = sftp.create(&remote_p).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to create remote file: {}", e))
+            })?;
+
+            let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
+            loop {
+                let n = local_file.read(&mut buffer).await.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to read local file: {}", e))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                remote_file.write_all(&buffer[..n]).await.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to write remote file: {}", e))
+                })?
+            }
+            Ok(())
+        })
+    }
+
+    /// Writes data over SFTP.
+    fn sftp_write_data<'p>(
+        &self,
+        py: Python<'p>,
+        data: String,
+        remote_path: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let session_arc = self.session.clone();
+        let sftp_arc = self.sftp_session.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
+
+            let mut remote_file = sftp.create(&remote_path).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to create remote file: {}", e))
+            })?;
+
+            remote_file.write_all(data.as_bytes()).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to write remote file: {}", e))
+            })?;
+
+            Ok(())
+        })
+    }
+
+    /// Lists the contents of a remote directory over SFTP.
+    fn sftp_list<'p>(&self, py: Python<'p>, path: String) -> PyResult<Bound<'p, PyAny>> {
+        let session_arc = self.session.clone();
+        let sftp_arc = self.sftp_session.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
+
+            let entries = sftp
+                .read_dir(&path)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to list directory: {}", e)))?;
 
-            channel
-                .request_subsystem(true, "sftp")
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            let sftp = SftpSession::new(channel.into_stream())
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            Ok(AsyncSftpClient {
-                client: Arc::new(sftp),
-            })
+            let mut results = Vec::new();
+            for entry in entries {
+                results.push(entry.file_name());
+            }
+            Ok(results)
         })
     }
 
@@ -588,141 +775,6 @@ impl AsyncConnection {
                 contents: None,
             })),
         }
-    }
-}
-
-/// # AsyncSftpClient
-///
-/// `AsyncSftpClient` is an asynchronous class for performing SFTP operations over an SSH connection.
-///
-/// ## Methods
-///
-/// ### `list`
-///
-/// Lists the contents of a remote directory. It takes the following parameter:
-///
-/// * `path`: The path to the remote directory to list.
-///
-/// ### `get`
-///
-/// Downloads a file from the remote server to the local machine. It takes the following parameters:
-///
-/// * `remote_path`: The path to the file on the remote server.
-/// * `local_path`: The path where to save the file on the local machine.
-///
-/// ### `put`
-///
-/// Uploads a file from the local machine to the remote server. It takes the following parameters:
-///
-/// * `local_path`: The path to the file on the local machine.
-/// * `remote_path`: The path where to save the file on the remote server.
-///
-#[pyclass]
-pub struct AsyncSftpClient {
-    client: Arc<SftpSession>,
-}
-
-#[pymethods]
-impl AsyncSftpClient {
-    fn list<'p>(&self, py: Python<'p>, path: String) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.client.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let entries = client
-                .read_dir(path)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            let mut results = Vec::new();
-            for entry in entries {
-                let filename = entry.file_name();
-                results.push(filename);
-            }
-            Ok(results)
-        })
-    }
-
-    fn get<'p>(
-        &self,
-        py: Python<'p>,
-        remote_path: String,
-        local_path: String,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.client.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut remote_file = client
-                .open(remote_path)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let mut local_file = tokio::fs::File::create(local_path)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            // Simple copy implementation
-            // In a real implementation, we might want to stream this more efficiently or handle large files better
-            // russh-sftp File implements AsyncRead
-            // tokio File implements AsyncWrite
-
-            // However, russh-sftp File might not implement tokio::io::AsyncRead directly in a way compatible with tokio::io::copy
-            // Let's check if we can just read into a buffer and write.
-
-            // russh_sftp::client::File implements tokio::io::AsyncRead
-
-            // We need to make sure we are using the right traits.
-            // Since we imported tokio::io::AsyncReadExt, we should be good if it implements it.
-
-            // Actually, let's just use a buffer loop to be safe and explicit.
-            let mut buffer = vec![0u8; 32768]; // 32KB buffer
-            loop {
-                let n = remote_file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                if n == 0 {
-                    break;
-                }
-                local_file
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            }
-
-            Ok(())
-        })
-    }
-
-    fn put<'p>(
-        &self,
-        py: Python<'p>,
-        local_path: String,
-        remote_path: String,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.client.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut local_file = tokio::fs::File::open(local_path)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            let mut remote_file = client
-                .create(remote_path)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            let mut buffer = vec![0u8; 32768];
-            loop {
-                let n = local_file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                if n == 0 {
-                    break;
-                }
-                remote_file
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            }
-
-            Ok(())
-        })
     }
 }
 

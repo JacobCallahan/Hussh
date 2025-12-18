@@ -30,24 +30,40 @@ async def test_async_connection_manual(run_test_server):
 @pytest.mark.asyncio
 async def test_async_sftp(run_test_server, tmp_path):
     async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
-        sftp = await conn.sftp()
-
-        # Test put
+        # Test sftp_write (upload a file)
         local_file = tmp_path / "test_put.txt"
         local_file.write_text("hello sftp")
         remote_path = "/root/test_put.txt"
 
-        await sftp.put(str(local_file), remote_path)
+        await conn.sftp_write(str(local_file), remote_path)
 
-        # Test list
-        files = await sftp.list("/root")
+        # Test sftp_list
+        files = await conn.sftp_list("/root")
         assert "test_put.txt" in files
 
-        # Test get
+        # Test sftp_read to local file
         download_path = tmp_path / "test_get.txt"
-        await sftp.get(remote_path, str(download_path))
-
+        await conn.sftp_read(remote_path, str(download_path))
         assert download_path.read_text() == "hello sftp"
+
+        # Test sftp_read returning contents
+        contents = await conn.sftp_read(remote_path)
+        assert contents == "hello sftp"
+
+
+@pytest.mark.asyncio
+async def test_async_sftp_write_data(run_test_server):
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
+        # Test sftp_write_data
+        await conn.sftp_write_data("hello world", "/root/hello.txt")
+
+        # Verify with sftp_read
+        contents = await conn.sftp_read("/root/hello.txt")
+        assert contents == "hello world"
+
+        # Verify with sftp_list
+        files = await conn.sftp_list("/root")
+        assert "hello.txt" in files
 
 
 @pytest.mark.asyncio
