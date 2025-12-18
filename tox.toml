@@ -1,0 +1,108 @@
+# Tox configuration for the hussh project
+# https://tox.wiki/en/stable/config.html
+
+[tox]
+requires = ["tox>=4.20"]
+env_list = ["py39", "py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "benchmarks-async", "build", "clean"]
+[labels]
+test = ["py39", "py310", "py311", "py312", "py313", "py314"]
+all = ["py39", "py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "benchmarks-async"]
+
+
+# Test Environments
+[env.py39]
+description = "Run tests with Python 3.9"
+installer = "uv"
+deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
+pass_env = ["CI"]
+
+commands = [["pytest", "-v", "tests/", "{posargs}"]]
+
+[env.py310]
+description = "Run tests with Python 3.10"
+installer = "uv"
+deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
+pass_env = ["CI"]
+
+commands = [["pytest", "-v", "tests/", "{posargs}"]]
+
+[env.py311]
+description = "Run tests with Python 3.11"
+installer = "uv"
+deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
+pass_env = ["CI"]
+
+commands = [["pytest", "-v", "tests/", "{posargs}"]]
+
+[env.py312]
+description = "Run tests with Python 3.12"
+installer = "uv"
+deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
+pass_env = ["CI"]
+
+commands = [["pytest", "-v", "tests/", "{posargs}"]]
+
+[env.py313]
+description = "Run tests with Python 3.13"
+installer = "uv"
+deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
+pass_env = ["CI"]
+
+commands = [["pytest", "-v", "tests/", "{posargs}"]]
+
+[env.py314]
+description = "Run tests with Python 3.14"
+installer = "uv"
+deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
+pass_env = ["CI"]
+
+commands = [["pytest", "-v", "tests/", "{posargs}"]]
+
+[env.lint]
+description = "Run linting and formatting checks"
+deps = ["pre-commit>=3.7"]
+skip_install = true
+commands = [["pre-commit", "run", "--all-files", "--show-diff-on-failure"]]
+
+[env.benchmarks-sync]
+description = "Run synchronous benchmarks"
+installer = "uv"
+deps = [
+    "rich",
+    "fabric",
+    "ssh2-python",
+    "asyncssh",
+    "docker",
+    "memray",
+]
+pass_env = ["CI"]
+commands = [["python", "benchmarks/run_benchmarks.py", "--sync"]]
+
+[env.benchmarks-async]
+description = "Run asynchronous benchmarks"
+installer = "uv"
+deps = [
+    "rich",
+    "fabric",
+    "ssh2-python",
+    "asyncssh",
+    "docker",
+    "memray",
+]
+pass_env = ["CI"]
+commands = [["python", "benchmarks/run_benchmarks.py", "--run-async"]]
+
+[env.build]
+description = "Build the project wheel"
+skip_install = true
+commands = [["maturin", "build"]]
+
+[env.clean]
+description = "Clean up build artifacts and caches"
+skip_install = true
+commands = [
+    ["python", "-c", "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').glob('*.egg-info')]"],
+    ["python", "-c", "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').rglob('__pycache__')]"],
+    ["python", "-c", "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.').glob('target/')] if pathlib.Path('target/').exists() else None"],
+    ["python", "-c", "print('Note: .tox directory preserved during clean. Use \"rm -rf .tox\" manually if needed.')"],
+]

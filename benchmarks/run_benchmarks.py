@@ -19,36 +19,41 @@ def start_server():
         print("Pulling test server image...")
         client.images.pull(TEST_SERVER_IMAGE)
 
+    # Ensure the container is removed before starting a new one
     try:
         container = client.containers.get("hussh-test-server")
-        if container.status != "running":
-            container.start()
-            time.sleep(5)
-        return container, False  # Not managed by us (already existed)
+        container.stop()
+        container.remove()
+        print("Removed existing hussh-test-server container.")
     except docker.errors.NotFound:
-        print("Starting test server container...")
-        container = client.containers.run(
-            TEST_SERVER_IMAGE,
-            command=[
-                "/usr/sbin/sshd",
-                "-D",
-                "-o",
-                "MaxStartups=200:30:300",
-                "-o",
-                "MaxSessions=200",
-            ],
-            detach=True,
-            ports={"22/tcp": 8022},
-            name="hussh-test-server",
-        )
-        time.sleep(5)
-        return container, True  # Managed by us
+        pass  # Container doesn't exist, no need to remove
+
+    print("Starting test server container...")
+    container = client.containers.run(
+        TEST_SERVER_IMAGE,
+        command=[
+            "/usr/sbin/sshd",
+            "-D",
+            "-o",
+            "MaxStartups=110:30:300",
+            "-o",
+            "MaxSessions=200",
+        ],
+        detach=True,
+        ports={"22/tcp": 8022},
+        name="hussh-test-server",
+    )
+    time.sleep(5)
+    return container, True  # Always managed by us now
 
 
-def run_all():
+def run_all(run_sync=False, run_async=False):
     """Find all the python files in this directory starting with bench_ and run them in groups."""
     container, managed = start_server()
     try:
+        if not run_sync and not run_async:
+            run_sync = run_async = True  # run both
+
         sync_benchmarks = []
         async_benchmarks = []
 
@@ -58,15 +63,17 @@ def run_all():
             else:
                 sync_benchmarks.append(file)
 
-        print("Running synchronous benchmarks...")
-        for file in sync_benchmarks:
-            print(f"Running {file}")
-            subprocess.run(["python", file], check=True, cwd=Path(__file__).parent)
+        if run_sync:
+            print("Running synchronous benchmarks...")
+            for file in sync_benchmarks:
+                print(f"Running {file}")
+                subprocess.run(["python", file], check=True, cwd=Path(__file__).parent)
 
-        print("\nRunning asynchronous benchmarks...")
-        for file in async_benchmarks:
-            print(f"Running {file}")
-            subprocess.run(["python", file], check=True, cwd=Path(__file__).parent)
+        if run_async:
+            print("\nRunning asynchronous benchmarks...")
+            for file in async_benchmarks:
+                print(f"Running {file}")
+                subprocess.run(["python", file], check=True, cwd=Path(__file__).parent)
     finally:
         if managed:
             print("Stopping test server container...")
@@ -161,9 +168,18 @@ def print_report(report_dict):
 
 
 if __name__ == "__main__":
-    run_all()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--sync", action="store_true", help="Run only synchronous benchmarks")
+    group.add_argument("--run-async", action="store_true", help="Run only asynchronous benchmarks")
+    args = parser.parse_args()
+
+    run_all(run_sync=args.sync, run_async=args.run_async)
     results_path = Path(__file__).parent / "bench_results.json"
-    report_dict = json.loads(results_path.read_text())
-    run_memray_reports(report_dict)
-    print_report(report_dict)
-    results_path.unlink()
+    if results_path.exists():
+        report_dict = json.loads(results_path.read_text())
+        run_memray_reports(report_dict)
+        print_report(report_dict)
+        results_path.unlink()
