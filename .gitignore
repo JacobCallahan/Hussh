@@ -73,5 +73,8 @@ docs/_build/
 # VSCode
 .vscode/
 
+# Zed
+.zed/
+
 # Pyenv
 .python-version
