@@ -71,6 +71,12 @@ jobs:
           --name hussh-test-server
         ports:
           - 8022:22
+      hussh-test-server2:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server2
+        ports:
+          - 8023:22
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -78,6 +84,9 @@ jobs:
           python-version-file: 'pyproject.toml'
           check-latest: true
           allow-prereleases: true
+      - name: Setup test hostnames
+        run: |
+          echo "127.0.0.1 hussh-server-1.test hussh-server-2.test hussh-server-3.test hussh-server-4.test hussh-server-5.test" | sudo tee -a /etc/hosts
       - name: Build wheels
         uses: PyO3/maturin-action@main
         env:
@@ -139,6 +148,12 @@ jobs:
           --name hussh-test-server
         ports:
           - 8022:22
+      hussh-test-server2:
+        image: ghcr.io/jacobcallahan/hussh/hussh-test-server:latest
+        options: >-
+          --name hussh-test-server2
+        ports:
+          - 8023:22
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -146,6 +161,9 @@ jobs:
           python-version-file: 'pyproject.toml'
           check-latest: true
           allow-prereleases: true
+      - name: Setup test hostnames
+        run: |
+          echo "127.0.0.1 hussh-server-1.test hussh-server-2.test hussh-server-3.test hussh-server-4.test hussh-server-5.test" | sudo tee -a /etc/hosts
       - name: Build wheels
         uses: PyO3/maturin-action@main
         env:
