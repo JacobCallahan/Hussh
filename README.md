@@ -28,6 +28,7 @@ That's it! One import and class instantion is all you need to:
 - Perform SCP actions
 - Perform SFTP actions
 - Get an interactive shell
+- Run operations across multiple hosts concurrently
 
 # Why Hussh?
 - 🔥 Blazingly fast!
@@ -244,13 +245,205 @@ async with AsyncConnection(host="my.test.server", username="user", password="pas
     print(tf.contents)
 ```
 
+# Concurrent Operations (MultiConnection)
+When you need to execute commands or transfer files across multiple hosts simultaneously, Hussh provides the `MultiConnection` class. It uses async operations internally but exposes a simple synchronous API.
+
+## QuickStart
+```python
+from hussh.aio import AsyncConnection
+from hussh.multi_conn import MultiConnection
+
+# Create connections to multiple hosts
+connections = [
+    AsyncConnection("server1.example.com", username="user", password="pass"),
+    AsyncConnection("server2.example.com", username="user", password="pass"),
+    AsyncConnection("server3.example.com", username="user", password="pass"),
+]
+
+# Use as a context manager for automatic connect/disconnect
+with MultiConnection(connections) as mc:
+    results = mc.execute("whoami")
+    for host, result in results.items():
+        print(f"{host}: {result.stdout.strip()}")
+```
+
+## Creating a MultiConnection
+
+### From AsyncConnection instances
+```python
+connections = [
+    AsyncConnection("server1", username="user", password="pass", port=22),
+    AsyncConnection("server2", username="user", password="pass", port=22),
+]
+mc = MultiConnection(connections, batch_size=50)
+```
+
+### From sync Connection instances
+```python
+from hussh import Connection
+from hussh.multi_conn import MultiConnection
+
+connections = [
+    Connection("server1", username="user", password="pass"),
+    Connection("server2", username="user", password="pass"),
+]
+mc = MultiConnection.from_connections(connections)
+```
+
+### With shared authentication
+```python
+mc = MultiConnection.from_shared_auth(
+    hosts=["server1", "server2", "server3"],
+    username="user",
+    password="pass",
+    port=22,
+    batch_size=100,  # max concurrent operations
+)
+```
+
+## Executing Commands
+
+### Same command on all hosts
+```python
+with MultiConnection(connections) as mc:
+    results = mc.execute("uptime")
+    for host, result in results.items():
+        print(f"{host}: {result.stdout}")
+```
+
+### Different commands per host
+```python
+with MultiConnection(connections) as mc:
+    # Map hostnames to commands
+    command_map = {
+        "server1": "systemctl status nginx",
+        "server2": "systemctl status apache2",
+        "server3": "systemctl status httpd",
+    }
+    results = mc.execute_map(command_map)
+```
+
+## Working with MultiResult
+The `execute` and other methods return a `MultiResult` object, which behaves like a dictionary mapping hostnames to `SSHResult` objects.
+
+```python
+with MultiConnection(connections) as mc:
+    results = mc.execute("whoami")
+
+    # Iterate like a dictionary
+    for host, result in results.items():
+        print(f"{host}: status={result.status}")
+
+    # Access specific hosts
+    print(results["server1"].stdout)
+
+    # Filter by success/failure
+    succeeded = results.succeeded  # MultiResult with only status == 0
+    failed = results.failed        # MultiResult with only status != 0
+
+    print(f"Succeeded: {len(succeeded)}, Failed: {len(failed)}")
+```
+
+### Handling partial failures
+```python
+from hussh.multi_conn import MultiConnection, PartialFailureException
+
+with MultiConnection(connections) as mc:
+    results = mc.execute("some_command")
+
+    # Option 1: Check and handle manually
+    if results.failed:
+        for host, result in results.failed.items():
+            print(f"Failed on {host}: {result.stderr}")
+
+    # Option 2: Raise an exception if any failed
+    try:
+        results.raise_if_any_failed()
+    except PartialFailureException as e:
+        print(f"Some hosts failed: {e}")
+        print(f"Succeeded: {list(e.succeeded.keys())}")
+        print(f"Failed: {list(e.failed.keys())}")
+```
+
+## SFTP Operations
+```python
+with MultiConnection(connections) as mc:
+    # Write data to all hosts
+    mc.sftp_write_data("config content", "/etc/myapp/config.txt")
+
+    # Write a local file to all hosts
+    mc.sftp_write("/local/path/file.txt", "/remote/path/file.txt")
+
+    # Read a file from all hosts
+    results = mc.sftp_read("/var/log/app.log")
+    for host, result in results.items():
+        print(f"=== {host} ===\n{result.stdout}")
+```
+
+## Tailing Files
+```python
+with MultiConnection(connections) as mc:
+    # Tail the same file on all hosts
+    with mc.tail("/var/log/syslog") as tailer:
+        # Do something that generates logs...
+        contents = tailer.read()
+        for host, content in contents.items():
+            print(f"{host}: {content}")
+
+    # Tail different files per host
+    file_map = {
+        "server1": "/var/log/nginx/access.log",
+        "server2": "/var/log/apache2/access.log",
+    }
+    with mc.tail_map(file_map) as tailer:
+        contents = tailer.read()
+```
+
+## Connection Management
+
+### Manual connect (without context manager)
+```python
+mc = MultiConnection(connections)
+connect_results = mc.connect()  # Explicitly connect
+
+# Check for connection failures
+if connect_results.failed:
+    print("Some connections failed!")
+
+results = mc.execute("whoami")
+mc.close()  # Don't forget to close!
+```
+
+### Pruning failed connections
+```python
+mc = MultiConnection(connections)
+
+# Remove hosts that fail to connect from the pool
+mc.connect(prune_failures=True)
+
+# Now mc only contains successfully connected hosts
+print(f"Connected to {len(mc.hosts)} hosts")
+results = mc.execute("whoami")  # Only runs on connected hosts
+mc.close()
+```
+
+## Controlling Concurrency
+The `batch_size` parameter limits how many operations run concurrently:
+
+```python
+# Connect to 1000 hosts, but only 50 concurrent operations at a time
+mc = MultiConnection.from_shared_auth(
+    hosts=large_host_list,
+    username="user",
+    password="pass",
+    batch_size=50,  # Prevents overwhelming resources
+)
+```
+
 # Disclaimer
 This is an early project that should not be used in sensitive production code!
-There isn't full exception handling, so expect some Rust panics to fall through.
 With that said, try it out and let me know your thoughts!
 
 # Future Features
-- Concurrent actions class
 - Low level bindings
-- Misc codebase improvements
 - TBD...

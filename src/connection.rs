@@ -222,6 +222,31 @@ impl Connection {
         }
         self.sftp_conn.as_ref().unwrap()
     }
+
+    // Public getters for use by multi_conn module
+    pub fn get_host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn get_port(&self) -> i32 {
+        self.port
+    }
+
+    pub fn get_username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn get_password(&self) -> &str {
+        &self.password
+    }
+
+    pub fn get_private_key(&self) -> &str {
+        &self.private_key
+    }
+
+    pub fn get_timeout(&self) -> u32 {
+        self.timeout
+    }
 }
 
 #[pymethods]

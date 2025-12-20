@@ -259,8 +259,18 @@ pub struct AsyncConnection {
     timeout: u64,
 }
 
-// Private helper methods for AsyncConnection
+// Private/internal async helper methods for AsyncConnection
 impl AsyncConnection {
+    /// Get the host for this connection
+    pub fn get_host(&self) -> String {
+        self.host.clone()
+    }
+
+    /// Get the port for this connection
+    pub fn get_port(&self) -> u16 {
+        self.port
+    }
+
     /// Lazily initializes and returns the SFTP session, caching it for reuse
     async fn get_or_init_sftp(
         session_arc: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
@@ -305,13 +315,267 @@ impl AsyncConnection {
 
         Ok(sftp)
     }
-}
 
-#[pymethods]
-impl AsyncConnection {
-    #[new]
-    #[pyo3(signature = (host, username=None, password=None, key_path=None, port=22, keepalive_interval=0, timeout=0))]
-    fn new(
+    /// Internal async connect implementation - used by MultiConnection
+    pub(crate) async fn connect_async(&self, timeout: Option<u64>) -> PyResult<()> {
+        let config = self.config.clone();
+        let host = self.host.clone();
+        let port = self.port;
+        let username = self.username.clone().unwrap_or_default();
+        let password = self.password.clone();
+        let key_path = self.key_path.clone();
+        let session_arc = self.session.clone();
+        let timeout = timeout.unwrap_or(self.timeout);
+
+        let run = async {
+            let handler = ClientHandler {};
+            let mut session = russh::client::connect(config, (host.as_str(), port), handler)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
+
+            // Authentication
+            let auth_res = if let Some(key_p) = key_path.clone() {
+                let key_p = shellexpand::full(&key_p)
+                    .map(|p| p.into_owned())
+                    .unwrap_or(key_p);
+                let key_path = Path::new(&key_p);
+                let key_pair = russh::keys::load_secret_key(key_path, password.as_deref())
+                    .map_err(|e| PyRuntimeError::new_err(format!("Failed to load key: {}", e)))?;
+                let key_with_hash = create_key_with_hash(key_pair);
+                session
+                    .authenticate_publickey(&username, key_with_hash)
+                    .await
+                    .map(|r| r.success())
+            } else if let Some(pwd) = password.clone() {
+                session
+                    .authenticate_password(&username, pwd)
+                    .await
+                    .map(|r| r.success())
+            } else {
+                // If no authentication method provided, try default SSH key files
+                try_default_keys(&mut session, &username, None).await
+            };
+
+            match auth_res {
+                Ok(true) => {
+                    // Authentication succeeded
+                }
+                Ok(false) => {
+                    return Err(PyRuntimeError::new_err(
+                        if key_path.is_some() || password.is_some() {
+                            "Authentication failed"
+                        } else {
+                            "Failed to authenticate with default SSH keys"
+                        },
+                    ));
+                }
+                Err(e) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Authentication failed: {}",
+                        e
+                    )));
+                }
+            }
+
+            let mut guard = session_arc.lock().await;
+            *guard = Some(Arc::new(session));
+
+            Ok(())
+        };
+
+        if timeout > 0 {
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
+                Ok(res) => res,
+                Err(_) => Err(PyTimeoutError::new_err("Connection timed out")),
+            }
+        } else {
+            run.await
+        }
+    }
+
+    /// Internal async execute implementation - used by MultiConnection
+    pub(crate) async fn execute_async(
+        &self,
+        command: String,
+        timeout: Option<u64>,
+    ) -> PyResult<SSHResult> {
+        let session_arc = self.session.clone();
+        let timeout = timeout.unwrap_or(0);
+
+        let run = async {
+            let guard = session_arc.lock().await;
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
+
+            // Clone the Arc<Handle>
+            let session = session.clone();
+            drop(guard);
+
+            let mut channel = session
+                .channel_open_session()
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit_code = 0;
+
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    russh::ChannelMsg::Data { ref data } => {
+                        stdout.extend_from_slice(data);
+                    }
+                    russh::ChannelMsg::ExtendedData { ref data, ext } => {
+                        if ext == 1 {
+                            stderr.extend_from_slice(data);
+                        }
+                    }
+                    russh::ChannelMsg::ExitStatus { exit_status } => {
+                        exit_code = exit_status;
+                    }
+                    _ => {}
+                }
+            }
+
+            let stdout_str = String::from_utf8_lossy(&stdout).to_string();
+            let stderr_str = String::from_utf8_lossy(&stderr).to_string();
+
+            Ok(SSHResult {
+                stdout: stdout_str,
+                stderr: stderr_str,
+                status: exit_code as i32,
+            })
+        };
+
+        if timeout > 0 {
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
+                Ok(res) => res,
+                Err(_) => Err(PyTimeoutError::new_err("Command timed out")),
+            }
+        } else {
+            run.await
+        }
+    }
+
+    /// Internal async close implementation - used by MultiConnection
+    pub(crate) async fn close_async(&self) {
+        let mut sftp_guard = self.sftp_session.lock().await;
+        *sftp_guard = None;
+        let mut guard = self.session.lock().await;
+        *guard = None;
+    }
+
+    /// Internal async SFTP read implementation - used by MultiConnection
+    pub(crate) async fn sftp_read_async(
+        &self,
+        remote_path: String,
+        local_path: Option<String>,
+    ) -> PyResult<String> {
+        let sftp =
+            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
+                .await?;
+
+        let mut remote_file = sftp
+            .open(&remote_path)
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to open remote file: {}", e)))?;
+
+        if let Some(local_p) = local_path {
+            // Save to local file
+            let mut local_file = tokio::fs::File::create(&local_p).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to create local file: {}", e))
+            })?;
+
+            let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
+            loop {
+                let n = remote_file.read(&mut buffer).await.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                local_file.write_all(&buffer[..n]).await.map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to write local file: {}", e))
+                })?;
+            }
+            Ok("Ok".to_string())
+        } else {
+            // Return contents as string
+            let mut buffer = Vec::new();
+            remote_file.read_to_end(&mut buffer).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
+            })?;
+            Ok(String::from_utf8_lossy(&buffer).to_string())
+        }
+    }
+
+    /// Internal async SFTP write implementation - used by MultiConnection
+    pub(crate) async fn sftp_write_async(
+        &self,
+        local_path: String,
+        remote_path: Option<String>,
+    ) -> PyResult<()> {
+        let sftp =
+            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
+                .await?;
+
+        let remote_p = remote_path.unwrap_or_else(|| local_path.clone());
+
+        let mut local_file = tokio::fs::File::open(&local_path)
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to open local file: {}", e)))?;
+
+        let mut remote_file = sftp
+            .create(&remote_p)
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create remote file: {}", e)))?;
+
+        let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
+        loop {
+            let n = local_file.read(&mut buffer).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to read local file: {}", e))
+            })?;
+            if n == 0 {
+                break;
+            }
+            remote_file.write_all(&buffer[..n]).await.map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to write remote file: {}", e))
+            })?
+        }
+        Ok(())
+    }
+
+    /// Internal async SFTP write data implementation - used by MultiConnection
+    pub(crate) async fn sftp_write_data_async(
+        &self,
+        data: String,
+        remote_path: String,
+    ) -> PyResult<()> {
+        let sftp =
+            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
+                .await?;
+
+        let mut remote_file = sftp
+            .create(&remote_path)
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create remote file: {}", e)))?;
+
+        remote_file
+            .write_all(data.as_bytes())
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write remote file: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Create a new AsyncConnection - used by MultiConnection
+    pub(crate) fn create(
         host: String,
         username: Option<String>,
         password: Option<String>,
@@ -338,85 +602,52 @@ impl AsyncConnection {
         }
     }
 
+    /// Create a FileTailer - used by MultiConnection
+    pub(crate) fn create_tailer(&self, remote_file: String) -> AsyncFileTailer {
+        AsyncFileTailer {
+            conn_session: self.session.clone(),
+            remote_file,
+            state: Arc::new(Mutex::new(TailerState {
+                sftp: None,
+                init_pos: None,
+                last_pos: 0,
+                contents: None,
+            })),
+        }
+    }
+}
+
+#[pymethods]
+impl AsyncConnection {
+    #[new]
+    #[pyo3(signature = (host, username=None, password=None, key_path=None, port=22, keepalive_interval=0, timeout=0))]
+    pub fn new(
+        host: String,
+        username: Option<String>,
+        password: Option<String>,
+        key_path: Option<String>,
+        port: u16,
+        keepalive_interval: u64,
+        timeout: u64,
+    ) -> Self {
+        Self::create(
+            host,
+            username,
+            password,
+            key_path,
+            port,
+            keepalive_interval,
+            timeout,
+        )
+    }
+
     #[pyo3(signature = (timeout=None))]
     fn connect<'p>(&self, py: Python<'p>, timeout: Option<u64>) -> PyResult<Bound<'p, PyAny>> {
-        let config = self.config.clone();
-        let host = self.host.clone();
-        let port = self.port;
-        let username = self.username.clone().unwrap_or("".to_string());
-        let password = self.password.clone();
-        let key_path = self.key_path.clone();
-        let session_arc = self.session.clone();
-        let timeout = timeout.unwrap_or(self.timeout);
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let run = async {
-                let handler = ClientHandler {};
-                let mut session = russh::client::connect(config, (host.as_str(), port), handler)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
-
-                // Authentication
-                let auth_res = if let Some(key_p) = key_path.clone() {
-                    let key_p = shellexpand::full(&key_p)
-                        .map(|p| p.into_owned())
-                        .unwrap_or(key_p);
-                    let key_path = Path::new(&key_p);
-                    let key_pair = russh::keys::load_secret_key(key_path, password.as_deref())
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Failed to load key: {}", e))
-                        })?;
-                    let key_with_hash = create_key_with_hash(key_pair);
-                    session
-                        .authenticate_publickey(&username, key_with_hash)
-                        .await
-                        .map(|r| r.success())
-                } else if let Some(pwd) = password.clone() {
-                    session
-                        .authenticate_password(&username, pwd)
-                        .await
-                        .map(|r| r.success())
-                } else {
-                    // If no authentication method provided, try default SSH key files
-                    try_default_keys(&mut session, &username, None).await
-                };
-
-                match auth_res {
-                    Ok(true) => {
-                        // Authentication succeeded
-                    }
-                    Ok(false) => {
-                        return Err(PyRuntimeError::new_err(
-                            if key_path.is_some() || password.is_some() {
-                                "Authentication failed"
-                            } else {
-                                "Failed to authenticate with default SSH keys"
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "Authentication failed: {}",
-                            e
-                        )));
-                    }
-                }
-
-                let mut guard = session_arc.lock().await;
-                *guard = Some(Arc::new(session));
-
-                Ok(())
-            };
-
-            if timeout > 0 {
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
-                    Ok(res) => res,
-                    Err(_) => Err(PyTimeoutError::new_err("Connection timed out")),
-                }
-            } else {
-                run.await
-            }
-        })
+        let conn = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { conn.connect_async(timeout).await },
+        )
     }
 
     #[pyo3(signature = (command, timeout=None))]
@@ -426,163 +657,27 @@ impl AsyncConnection {
         command: String,
         timeout: Option<u64>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
-        let timeout = timeout.unwrap_or(0);
-
+        let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let run = async {
-                let guard = session_arc.lock().await;
-                let session = guard
-                    .as_ref()
-                    .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-
-                // Clone the Arc<Handle>
-                let session = session.clone();
-                drop(guard);
-
-                let mut channel = session
-                    .channel_open_session()
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-                channel
-                    .exec(true, command)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                let mut exit_code = 0;
-
-                while let Some(msg) = channel.wait().await {
-                    match msg {
-                        russh::ChannelMsg::Data { ref data } => {
-                            stdout.extend_from_slice(data);
-                        }
-                        russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                            if ext == 1 {
-                                stderr.extend_from_slice(data);
-                            }
-                        }
-                        russh::ChannelMsg::ExitStatus { exit_status } => {
-                            exit_code = exit_status;
-                        }
-                        _ => {}
-                    }
-                }
-
-                let stdout_str = String::from_utf8_lossy(&stdout).to_string();
-                let stderr_str = String::from_utf8_lossy(&stderr).to_string();
-
-                Ok(SSHResult {
-                    stdout: stdout_str,
-                    stderr: stderr_str,
-                    status: exit_code as i32,
-                })
-            };
-
-            if timeout > 0 {
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
-                    Ok(res) => res,
-                    Err(_) => Err(PyTimeoutError::new_err("Command timed out")),
-                }
-            } else {
-                run.await
-            }
+            conn.execute_async(command, timeout).await
         })
     }
 
     fn close<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
-        let sftp_arc = self.sftp_session.clone();
+        let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut sftp_guard = sftp_arc.lock().await;
-            *sftp_guard = None;
-            let mut guard = session_arc.lock().await;
-            *guard = None;
+            conn.close_async().await;
             Ok(())
         })
     }
 
     fn __aenter__<'p>(slf: PyRef<'p, Self>, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let config = slf.config.clone();
-        let host = slf.host.clone();
-        let port = slf.port;
-        let username = slf.username.clone().unwrap_or("".to_string());
-        let password = slf.password.clone();
-        let key_path = slf.key_path.clone();
-        let session_arc = slf.session.clone();
-        let timeout = slf.timeout;
-
-        let py_self = Bound::new(py, (*slf).clone())?.into_any().unbind();
+        let conn = (*slf).clone();
+        let py_self = Bound::new(py, conn.clone())?.into_any().unbind();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let run = async {
-                let handler = ClientHandler {};
-                let mut session = russh::client::connect(config, (host.as_str(), port), handler)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
-
-                // Auth ...
-                let auth_res = if let Some(key_p) = key_path.clone() {
-                    let key_p = shellexpand::full(&key_p)
-                        .map(|p| p.into_owned())
-                        .unwrap_or(key_p);
-                    let key_path = Path::new(&key_p);
-                    let key_pair = russh::keys::load_secret_key(key_path, password.as_deref())
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Failed to load key: {}", e))
-                        })?;
-                    let key_with_hash = create_key_with_hash(key_pair);
-                    session
-                        .authenticate_publickey(&username, key_with_hash)
-                        .await
-                        .map(|r| r.success())
-                } else if let Some(pwd) = password.clone() {
-                    session
-                        .authenticate_password(&username, pwd)
-                        .await
-                        .map(|r| r.success())
-                } else {
-                    // If no authentication method provided, try default SSH key files
-                    try_default_keys(&mut session, &username, None).await
-                };
-
-                match auth_res {
-                    Ok(true) => {
-                        // Authentication succeeded
-                    }
-                    Ok(false) => {
-                        return Err(PyRuntimeError::new_err(
-                            if key_path.is_some() || password.is_some() {
-                                "Authentication failed"
-                            } else {
-                                "Failed to authenticate with default SSH keys"
-                            },
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(PyRuntimeError::new_err(format!(
-                            "Authentication failed: {}",
-                            e
-                        )));
-                    }
-                }
-
-                let mut guard = session_arc.lock().await;
-                *guard = Some(Arc::new(session));
-
-                Ok(py_self)
-            };
-
-            if timeout > 0 {
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
-                    Ok(res) => res,
-                    Err(_) => Err(PyTimeoutError::new_err("Connection timed out")),
-                }
-            } else {
-                run.await
-            }
+            conn.connect_async(None).await?;
+            Ok(py_self)
         })
     }
 
@@ -606,42 +701,9 @@ impl AsyncConnection {
         remote_path: String,
         local_path: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
-        let sftp_arc = self.sftp_session.clone();
+        let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
-
-            let mut remote_file = sftp.open(&remote_path).await.map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to open remote file: {}", e))
-            })?;
-
-            if let Some(local_p) = local_path {
-                // Save to local file
-                let mut local_file = tokio::fs::File::create(&local_p).await.map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to create local file: {}", e))
-                })?;
-
-                let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
-                loop {
-                    let n = remote_file.read(&mut buffer).await.map_err(|e| {
-                        PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
-                    })?;
-                    if n == 0 {
-                        break;
-                    }
-                    local_file.write_all(&buffer[..n]).await.map_err(|e| {
-                        PyRuntimeError::new_err(format!("Failed to write local file: {}", e))
-                    })?;
-                }
-                Ok("Ok".to_string())
-            } else {
-                // Return contents as string
-                let mut buffer = Vec::new();
-                remote_file.read_to_end(&mut buffer).await.map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
-                })?;
-                Ok(String::from_utf8_lossy(&buffer).to_string())
-            }
+            conn.sftp_read_async(remote_path, local_path).await
         })
     }
 
@@ -654,34 +716,9 @@ impl AsyncConnection {
         local_path: String,
         remote_path: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
-        let sftp_arc = self.sftp_session.clone();
+        let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
-
-            let remote_p = remote_path.unwrap_or_else(|| local_path.clone());
-
-            let mut local_file = tokio::fs::File::open(&local_path).await.map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to open local file: {}", e))
-            })?;
-
-            let mut remote_file = sftp.create(&remote_p).await.map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to create remote file: {}", e))
-            })?;
-
-            let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
-            loop {
-                let n = local_file.read(&mut buffer).await.map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to read local file: {}", e))
-                })?;
-                if n == 0 {
-                    break;
-                }
-                remote_file.write_all(&buffer[..n]).await.map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to write remote file: {}", e))
-                })?
-            }
-            Ok(())
+            conn.sftp_write_async(local_path, remote_path).await
         })
     }
 
@@ -692,20 +729,9 @@ impl AsyncConnection {
         data: String,
         remote_path: String,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
-        let sftp_arc = self.sftp_session.clone();
+        let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
-
-            let mut remote_file = sftp.create(&remote_path).await.map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to create remote file: {}", e))
-            })?;
-
-            remote_file.write_all(data.as_bytes()).await.map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to write remote file: {}", e))
-            })?;
-
-            Ok(())
+            conn.sftp_write_data_async(data, remote_path).await
         })
     }
 
@@ -765,16 +791,7 @@ impl AsyncConnection {
     }
 
     fn tail(&self, remote_file: String) -> AsyncFileTailer {
-        AsyncFileTailer {
-            conn_session: self.session.clone(),
-            remote_file,
-            state: Arc::new(Mutex::new(TailerState {
-                sftp: None,
-                init_pos: None,
-                last_pos: 0,
-                contents: None,
-            })),
-        }
+        self.create_tailer(remote_file)
     }
 }
 
@@ -952,10 +969,12 @@ struct TailerState {
 #[derive(Clone)]
 pub struct AsyncFileTailer {
     conn_session: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
+    #[pyo3(get)]
     remote_file: String,
     state: Arc<Mutex<TailerState>>,
 }
 
+// Internal async methods for AsyncFileTailer - used by MultiFileTailer
 impl AsyncFileTailer {
     async fn _seek_end(state: Arc<Mutex<TailerState>>, remote_file: String) -> PyResult<u64> {
         let mut guard = state.lock().await;
@@ -974,6 +993,99 @@ impl AsyncFileTailer {
             Err(PyRuntimeError::new_err("SFTP session not initialized"))
         }
     }
+
+    /// Internal async read implementation - used by MultiFileTailer
+    pub(crate) async fn read_async(&self, from_pos: Option<u64>) -> PyResult<String> {
+        let mut guard = self.state.lock().await;
+        let from_pos = from_pos.unwrap_or(guard.last_pos);
+
+        if let Some(sftp) = &guard.sftp {
+            let mut file = sftp
+                .open(&self.remote_file)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Open error: {}", e)))?;
+
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Read error: {}", e)))?;
+
+            if from_pos > buffer.len() as u64 {
+                guard.last_pos = buffer.len() as u64;
+                return Ok(String::new());
+            }
+
+            let content = String::from_utf8_lossy(&buffer[from_pos as usize..]).to_string();
+            guard.last_pos = buffer.len() as u64;
+            Ok(content)
+        } else {
+            Err(PyRuntimeError::new_err("SFTP session not initialized"))
+        }
+    }
+
+    /// Internal async enter implementation - used by MultiFileTailer
+    pub(crate) async fn enter_async(&self) -> PyResult<()> {
+        let guard = self.conn_session.lock().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?
+            .clone();
+        drop(guard);
+
+        let channel = session
+            .channel_open_session()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        {
+            let mut state_guard = self.state.lock().await;
+            state_guard.sftp = Some(sftp);
+        }
+
+        AsyncFileTailer::_seek_end(self.state.clone(), self.remote_file.clone()).await?;
+
+        Ok(())
+    }
+
+    /// Internal async exit implementation - used by MultiFileTailer
+    /// Returns the content read since entry
+    pub(crate) async fn exit_async(&self) -> PyResult<String> {
+        let mut guard = self.state.lock().await;
+        let init_pos = guard.init_pos.unwrap_or(0);
+
+        if let Some(sftp) = &guard.sftp {
+            let mut file = sftp
+                .open(&self.remote_file)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Open error: {}", e)))?;
+
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("Read error: {}", e)))?;
+
+            let content = String::from_utf8_lossy(&buffer[init_pos as usize..]).to_string();
+            guard.contents = Some(content.clone());
+            Ok(content)
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Get the current contents
+    pub(crate) fn get_contents(&self) -> Option<String> {
+        let guard = self.state.blocking_lock();
+        guard.contents.clone()
+    }
 }
 
 #[pymethods]
@@ -988,73 +1100,19 @@ impl AsyncFileTailer {
 
     #[pyo3(signature = (from_pos=None))]
     fn read<'p>(&self, py: Python<'p>, from_pos: Option<u64>) -> PyResult<Bound<'p, PyAny>> {
-        let state = self.state.clone();
-        let remote_file = self.remote_file.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = state.lock().await;
-            let from_pos = from_pos.unwrap_or(guard.last_pos);
-
-            if let Some(sftp) = &guard.sftp {
-                let mut file = sftp
-                    .open(&remote_file)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Open error: {}", e)))?;
-
-                let mut buffer = Vec::new();
-                file.read_to_end(&mut buffer)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Read error: {}", e)))?;
-
-                if from_pos > buffer.len() as u64 {
-                    guard.last_pos = buffer.len() as u64;
-                    return Ok(String::new());
-                }
-
-                let content = String::from_utf8_lossy(&buffer[from_pos as usize..]).to_string();
-                guard.last_pos = buffer.len() as u64;
-                Ok(content)
-            } else {
-                Err(PyRuntimeError::new_err("SFTP session not initialized"))
-            }
-        })
+        let tailer = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { tailer.read_async(from_pos).await },
+        )
     }
 
     fn __aenter__<'p>(slf: PyRef<'p, Self>, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let conn_session = slf.conn_session.clone();
-        let state = slf.state.clone();
-        let remote_file = slf.remote_file.clone();
-
-        let py_self = Bound::new(py, (*slf).clone())?.into_any().unbind();
+        let tailer = (*slf).clone();
+        let py_self = Bound::new(py, tailer.clone())?.into_any().unbind();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = conn_session.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?
-                .clone();
-            drop(guard);
-
-            let channel = session
-                .channel_open_session()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            channel
-                .request_subsystem(true, "sftp")
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            let sftp = SftpSession::new(channel.into_stream())
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            {
-                let mut state_guard = state.lock().await;
-                state_guard.sftp = Some(sftp);
-            }
-
-            AsyncFileTailer::_seek_end(state, remote_file).await?;
-
+            tailer.enter_async().await?;
             Ok(py_self)
         })
     }
@@ -1066,34 +1124,15 @@ impl AsyncFileTailer {
         _exc_value: Option<Bound<'p, PyAny>>,
         _traceback: Option<Bound<'p, PyAny>>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let state = self.state.clone();
-        let remote_file = self.remote_file.clone();
-
+        let tailer = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = state.lock().await;
-            let init_pos = guard.init_pos.unwrap_or(0);
-
-            if let Some(sftp) = &guard.sftp {
-                let mut file = sftp
-                    .open(&remote_file)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Open error: {}", e)))?;
-
-                let mut buffer = Vec::new();
-                file.read_to_end(&mut buffer)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Read error: {}", e)))?;
-
-                let content = String::from_utf8_lossy(&buffer[init_pos as usize..]).to_string();
-                guard.contents = Some(content);
-            }
+            tailer.exit_async().await?;
             Ok(())
         })
     }
 
     #[getter]
     fn contents(&self) -> PyResult<Option<String>> {
-        let guard = self.state.blocking_lock();
-        Ok(guard.contents.clone())
+        Ok(self.get_contents())
     }
 }
