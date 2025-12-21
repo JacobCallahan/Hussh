@@ -9,18 +9,15 @@ MultiConnection Test Setup
 --------------------------
 The MultiConnection tests require unique hostnames that resolve to 127.0.0.1.
 Add the following line to your /etc/hosts file:
-
-    127.0.0.1 hussh-server-1.test hussh-server-2.test hussh-server-3.test
-    hussh-server-4.test hussh-server-5.test
+    127.0.0.1 hussh-server-1.test hussh-server-2.test hussh-server-3.test hussh-server-4.test hussh-server-5.test  # noqa: E501
 
 On Linux/macOS:
-    echo "127.0.0.1 hussh-server-1.test hussh-server-2.test hussh-server-3.test \
-        hussh-server-4.test hussh-server-5.test" | sudo tee -a /etc/hosts
+    echo "127.0.0.1 hussh-server-1.test hussh-server-2.test hussh-server-3.test hussh-server-4.test hussh-server-5.test" | sudo tee -a /etc/hosts  # noqa: E501
 
 If these hostnames are not configured, the MultiConnection tests will be skipped.
 
 GitHub Actions automatically configures these hostnames in the CI workflow.
-"""
+"""  # noqa: E501
 
 import os
 from pathlib import Path, PurePath

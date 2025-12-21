@@ -10,6 +10,74 @@ from rich.table import Table
 TEST_SERVER_IMAGE = "ghcr.io/jacobcallahan/hussh/hussh-test-server:latest"
 
 
+def configure_remote_sshd():
+    """Configure remote SSHD to accept up to 200 max sessions and startups."""
+    target_path = Path(__file__).parent / "target.json"
+    if not target_path.exists():
+        print("target.json not found, skipping remote SSHD configuration.")
+        return
+
+    target_info = json.loads(target_path.read_text())
+    host = target_info.get("host", "")
+
+    if host in ("localhost", "127.0.0.1"):
+        print("Target is localhost, no remote SSHD configuration needed.")
+        return
+
+    print(f"Configuring remote SSHD on {host}:{target_info.get('port', 22)}...")
+
+    try:
+        from hussh import Connection
+    except ImportError:
+        print("hussh not available, cannot configure remote SSHD automatically.")
+        return
+
+    try:
+        conn = Connection(
+            host=host,
+            port=target_info.get("port", 22),
+            username=target_info.get("username", "root"),
+            password=target_info.get("password"),
+        )
+
+        # Backup current config
+        conn.execute("cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak")
+
+        # --- Configure MaxSessions ---
+        conn.execute("sed -i 's/^#MaxSessions.*/MaxSessions 200/' /etc/ssh/sshd_config")
+        conn.execute("sed -i 's/^MaxSessions.*/MaxSessions 200/' /etc/ssh/sshd_config")
+        # Ensure it exists if regex missed
+        conn.execute(
+            "grep -q '^MaxSessions' /etc/ssh/sshd_config || echo 'MaxSessions 200' >> /etc/ssh/sshd_config"  # noqa: E501
+        )
+
+        # --- Configure MaxStartups (Crucial for concurrent connections) ---
+        # We set this to 200 to allow 200 unauthenticated connections at once without dropping
+        conn.execute("sed -i 's/^#MaxStartups.*/MaxStartups 200/' /etc/ssh/sshd_config")
+        conn.execute("sed -i 's/^MaxStartups.*/MaxStartups 200/' /etc/ssh/sshd_config")
+        # Ensure it exists if regex missed
+        conn.execute(
+            "grep -q '^MaxStartups' /etc/ssh/sshd_config || echo 'MaxStartups 200' >> /etc/ssh/sshd_config"  # noqa: E501
+        )
+
+        # Restart SSHD
+        # RHEL 9 prefers systemctl, but keeping fallbacks is fine
+        conn.execute("systemctl restart sshd || service ssh restart")
+
+        # Verify
+        print("Verifying configuration:")
+        res_sess = conn.execute("grep -i '^MaxSessions' /etc/ssh/sshd_config")
+        print(f"  {res_sess.stdout.strip()}")
+        res_start = conn.execute("grep -i '^MaxStartups' /etc/ssh/sshd_config")
+        print(f"  {res_start.stdout.strip()}")
+
+        conn.close()
+        print("Remote SSHD configuration completed.")
+
+    except Exception as e:
+        print(f"Failed to configure remote SSHD: {e}")
+
+
 def start_server():
     """Start the test server container."""
     client = docker.from_env()
@@ -35,21 +103,37 @@ def start_server():
             "/usr/sbin/sshd",
             "-D",
             "-o",
-            "MaxStartups=110:30:300",
+            "MaxStartups=200:30:400",
             "-o",
             "MaxSessions=200",
         ],
         detach=True,
         ports={"22/tcp": 8022},
         name="hussh-test-server",
+        ulimits=[docker.types.Ulimit(name="nofile", soft=1024, hard=2048)],
     )
     time.sleep(5)
     return container, True  # Always managed by us now
 
 
-def run_all(run_sync=False, run_async=False):
+def run_all(run_sync=False, run_async=False):  # noqa: PLR0912
     """Find all the python files in this directory starting with bench_ and run them in groups."""
-    container, managed = start_server()
+    configure_remote_sshd()
+
+    # Check if we need to start the local container
+    target_path = Path(__file__).parent / "target.json"
+    start_container = True
+    if target_path.exists():
+        target_info = json.loads(target_path.read_text())
+        host = target_info.get("host", "")
+        if host not in ("localhost", "127.0.0.1"):
+            start_container = False
+
+    container = None
+    managed = False
+    if start_container:
+        container, managed = start_server()
+
     try:
         if not run_sync and not run_async:
             run_sync = run_async = True  # run both
@@ -75,7 +159,7 @@ def run_all(run_sync=False, run_async=False):
                 print(f"Running {file}")
                 subprocess.run(["python", file], check=True, cwd=Path(__file__).parent)
     finally:
-        if managed:
+        if managed and container:
             print("Stopping test server container...")
             container.stop()
             container.remove()
@@ -103,7 +187,7 @@ def run_memray_reports(report_dict):
 
             if base_lib in report_dict and suffix in report_dict[base_lib]:
                 report_dict[base_lib][suffix]["peak_memory"] = (
-                    f'{results["metadata"]["peak_memory"] / 1024 / 1024:.2f} MB'
+                    f"{results['metadata']['peak_memory'] / 1024 / 1024:.2f} MB"
                 )
                 report_dict[base_lib][suffix]["allocations"] = str(
                     results["metadata"]["total_allocations"]
@@ -111,7 +195,7 @@ def run_memray_reports(report_dict):
         else:
             # sync
             report_dict[lib]["peak_memory"] = (
-                f'{results["metadata"]["peak_memory"] / 1024 / 1024:.2f} MB'
+                f"{results['metadata']['peak_memory'] / 1024 / 1024:.2f} MB"
             )
             report_dict[lib]["allocations"] = str(results["metadata"]["total_allocations"])
         json_file.unlink()

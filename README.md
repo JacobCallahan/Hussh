@@ -6,15 +6,24 @@
 
 Hussh (pronounced "hush") is a client-side ssh library that offers low level performance through a high level interface.
 
-Hussh uses [pyo3](https://docs.rs/pyo3/latest/pyo3/) to create Python bindings around the [ssh2](https://docs.rs/ssh2/latest/ssh2/) library for Rust.
+Hussh uses [pyo3](https://docs.rs/pyo3/latest/pyo3/) to create Python bindings around the [ssh2](https://docs.rs/ssh2/latest/ssh2/) and [russh](https://docs.rs/russh/latest/russh/) libraries for Rust; these allow for synchronous and asynchronous ssh connections. 
 
 # Installation
 ```
 pip install hussh
 ```
 
+# Table of Contents
+
+- [QuickStart](#quickstart)
+- [Why Hussh?](#why-hussh)
+- [Synchronous Usage](#synchronous-usage)
+- [Asynchronous Usage](#asynchronous-usage)
+- [Concurrent Operations](#concurrent-operations-multiconnection)
+- [Documentation](#documentation)
+
 # QuickStart
-Hussh currently just offers a `Connection` class as your primary interface.
+Hussh's synchronous `Connection` class will likely be your primary interface.
 ```python
 from hussh import Connection
 
@@ -28,12 +37,13 @@ That's it! One import and class instantion is all you need to:
 - Perform SCP actions
 - Perform SFTP actions
 - Get an interactive shell
-- Run operations across multiple hosts concurrently
 
 # Why Hussh?
 - 🔥 Blazingly fast!
 - 🪶 Incredibly lightweight!
 - 🧠 Super easy to use!
+- ⚡ Asynchronous!
+- 🥞 Concurrency!
 
 ## Benchmarks
 Hussh demonstrates the performance you'd expect from a low level ssh library.
@@ -49,132 +59,40 @@ Remote Server
 Hussh's benchmark script are also open sourced in the `benchmarks` directory in this repository.
 Clone the repo, follow the setup instructions, then let us know how it did!
 
-# Authentication
-You've already seen password-based authentication, but here it is again.
+# Synchronous Usage
+
+## Authentication
 ```python
+from hussh import Connection
+
+# Password authentication
 conn = Connection(host="my.test.server", username="user", password="pass")
 
-#  or leave out username and connect as root
-conn = Connection(host="my.test.server", password="pass")
-```
-
-If you prefer key-based authentication, Hussh can do that as well.
-```python
+# Key-based authentication
 conn = Connection(host="my.test.server", private_key="~/.ssh/id_rsa")
-
-# If your key is password protected, just use the password argument
-conn = Connection(host="my.test.server", private_key="~/.ssh/id_rsa", password="pass")
 ```
 
-Hussh can also do agent-based authentication, if you've already established it.
-```python
-conn = Connection("my.test.server")
-```
-
-## Cleaning up after yourself
-
-Hussh will clean up after itself automatically when the `Connection` object is garbage collected.
-
-However, if you want to more explicitly clean up after yourself, you can `close` the connection.
-```python
-conn.close()
-```
-or you can use the `Connection` class' context manager, which will `close` when you exit the context.
-```python
-with Connection(host="my.test.server", password="pass") as conn:
-   result = conn.execute("ls")
-assert result.status == 0
-```
-
-# Executing commands
-The most basic foundation of ssh libraries is the ability to execute commands against the remote host.
-For Hussh, just use the `Connection` object's `execute` method.
+## Executing Commands
 ```python
 result = conn.execute("whoami")
 print(result.stdout, result.stderr, result.status)
 ```
-Each execute returns an `SSHResult` object with command's stdout, stderr, and status.
 
-# SFTP
-If you need to transfer files to/from the remote host, SFTP may be your best bet.
-
-## Writing files and data
+## File Transfers (SFTP)
 ```python
-# write a local file to the remote destination
+# Write a local file to remote
 conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
 
-# Write UTF-8 data to a remote file
-conn.sftp_write_data(data="Hello there!", remote_path="/dest/path/file")
-```
-
-## Reading files
-```python
-# You can copy a remote file to a local destination
-conn.sftp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
-# Or copy the remote file contents to a string
+# Read a remote file
 contents = conn.sftp_read(remote_path="/dest/path/file")
 ```
 
-## Copy files from one connection to another
-Hussh offers a shortcut that allows you to copy a file between two established connections.
-```python
-source_conn = Connection("my.first.server")
-dest_conn = Connection("my.second.server", password="secret")
-# Copy from source to destination
-source_conn.remote_copy(source_path="/root/myfile.txt", dest_conn=dest_conn)
-```
-By default, if you don't pass in an alternate `dest_path`, Hussh will copy it to the same path as it came from on source.
-
-
-# SCP
-For remote servers that support SCP, Hussh can do that to.
-
-## Writing files and data
-```python
-# write a local file to the remote destination
-conn.scp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
-
-# Write UTF-8 data to a remote file
-conn.scp_write_data(data="Hello there!", remote_path="/dest/path/file")
-```
-
-## Reading files
-```python
-# You can copy a remote file to a local destination
-conn.scp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
-# Or copy the remote file contents to a string
-contents = conn.scp_read(remote_path="/dest/path/file")
-```
-
-# Tailing Files
-Hussh offers a built-in method for tailing files on a `Connection` with the `tail` method.
-```python
-with conn.tail("/path/to/file.txt") as tf:
-   # perform some actions or wait
-   print(tf.read())  # at any time, you can read any unread contents
-   # when you're done tailing, exit the context manager
-print(tf.contents)
-```
-
-# Interactive Shell
-If you need to keep a shell open to perform more complex interactions, you can get an `InteractiveShell` instance from the `Connection` class instance.
-To use the interactive shell, it is recommended to use the `shell()` context manager from the `Connection` class.
-You can send commands to the shell using the `send` method, then get the results from `result` when you exit the context manager.
-
-```python
-with conn.shell() as shell:
-   shell.send("ls")
-   shell.send("pwd")
-   shell.send("whoami")
-
-print(shell.result.stdout)
-```
-**Note:** The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
+📚 **For complete documentation including SCP, file tailing, interactive shells, and more, see [Synchronous Usage](docs/synchronous.md).**
 
 # Asynchronous Usage
-Hussh also offers an `AsyncConnection` class for asynchronous operations.
 
-## QuickStart
+Hussh offers an `AsyncConnection` class for asynchronous operations.
+
 ```python
 import asyncio
 from hussh.aio import AsyncConnection
@@ -187,258 +105,40 @@ async def main():
 asyncio.run(main())
 ```
 
-## Timeouts
-You can specify a timeout (in seconds) for the connection and for individual command executions.
-
-```python
-# Set a default timeout for the connection
-async with AsyncConnection(host="my.test.server", timeout=10) as conn:
-    # This command will use the connection's default timeout (10s)
-    await conn.execute("sleep 5")
-    
-    # You can override the timeout for specific commands
-    try:
-        await conn.execute("sleep 20", timeout=5)
-    except TimeoutError:
-        print("Command timed out!")
-```
-
-## SFTP
-Async SFTP operations are available directly on the connection, mirroring the synchronous API.
-```python
-async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
-    # Write a local file to the remote server
-    await conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
-
-    # Write UTF-8 data to a remote file
-    await conn.sftp_write_data(data="Hello there!", remote_path="/dest/path/file")
-
-    # Read a remote file to a local destination
-    await conn.sftp_read(remote_path="/dest/path/file", local_path="/path/to/my/file")
-
-    # Read a remote file's contents as a string
-    contents = await conn.sftp_read(remote_path="/dest/path/file")
-
-    # List directory contents
-    files = await conn.sftp_list("/remote/path")
-```
-
-## Interactive Shell
-```python
-async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
-    async with await conn.shell() as shell:
-        await shell.send("ls")
-        result = await shell.read()
-        print(result.stdout)
-        # one of the advantages of an async shell is that you can read and write multiple times
-        await shell.send("whoami")
-        result = await shell.read()
-        print(f"I'm logged in as {result.stdout}")
-```
-
-## Tailing Files
-```python
-async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
-    async with conn.tail("/path/to/file.txt") as tf:
-        print(await tf.read())
-    # You can also access the full contents read during the session
-    print(tf.contents)
-```
+📚 **For complete documentation including timeouts, async SFTP, interactive shells, and file tailing, see [Asynchronous Usage](docs/asynchronous.md).**
 
 # Concurrent Operations (MultiConnection)
-When you need to execute commands or transfer files across multiple hosts simultaneously, Hussh provides the `MultiConnection` class. It uses async operations internally but exposes a simple synchronous API.
 
-## QuickStart
+When you need to execute commands or transfer files across multiple hosts simultaneously, use `MultiConnection`.
+
 ```python
-from hussh.aio import AsyncConnection
 from hussh.multi_conn import MultiConnection
 
-# Create connections to multiple hosts
-connections = [
-    AsyncConnection("server1.example.com", username="user", password="pass"),
-    AsyncConnection("server2.example.com", username="user", password="pass"),
-    AsyncConnection("server3.example.com", username="user", password="pass"),
-]
+# Create connections with shared authentication
+mc = MultiConnection.from_shared_auth(
+    hosts=["server1", "server2", "server3"],
+    username="user",
+    password="pass",
+)
 
-# Use as a context manager for automatic connect/disconnect
-with MultiConnection(connections) as mc:
+# Execute on all hosts
+with mc:
     results = mc.execute("whoami")
     for host, result in results.items():
         print(f"{host}: {result.stdout.strip()}")
 ```
 
-## Creating a MultiConnection
+📚 **For complete documentation including `MultiResult` handling, SFTP operations, file tailing, error handling, and concurrency control, see [MultiConnection Usage](docs/multi-connection.md).**
 
-### From AsyncConnection instances
-```python
-connections = [
-    AsyncConnection("server1", username="user", password="pass", port=22),
-    AsyncConnection("server2", username="user", password="pass", port=22),
-]
-mc = MultiConnection(connections, batch_size=50)
-```
+# Documentation
 
-### From sync Connection instances
-```python
-from hussh import Connection
-from hussh.multi_conn import MultiConnection
+For detailed guides and complete API documentation, see the [docs](docs/) directory:
 
-connections = [
-    Connection("server1", username="user", password="pass"),
-    Connection("server2", username="user", password="pass"),
-]
-mc = MultiConnection.from_connections(connections)
-```
-
-### With shared authentication
-```python
-mc = MultiConnection.from_shared_auth(
-    hosts=["server1", "server2", "server3"],
-    username="user",
-    password="pass",
-    port=22,
-    batch_size=100,  # max concurrent operations
-)
-```
-
-## Executing Commands
-
-### Same command on all hosts
-```python
-with MultiConnection(connections) as mc:
-    results = mc.execute("uptime")
-    for host, result in results.items():
-        print(f"{host}: {result.stdout}")
-```
-
-### Different commands per host
-```python
-with MultiConnection(connections) as mc:
-    # Map hostnames to commands
-    command_map = {
-        "server1": "systemctl status nginx",
-        "server2": "systemctl status apache2",
-        "server3": "systemctl status httpd",
-    }
-    results = mc.execute_map(command_map)
-```
-
-## Working with MultiResult
-The `execute` and other methods return a `MultiResult` object, which behaves like a dictionary mapping hostnames to `SSHResult` objects.
-
-```python
-with MultiConnection(connections) as mc:
-    results = mc.execute("whoami")
-
-    # Iterate like a dictionary
-    for host, result in results.items():
-        print(f"{host}: status={result.status}")
-
-    # Access specific hosts
-    print(results["server1"].stdout)
-
-    # Filter by success/failure
-    succeeded = results.succeeded  # MultiResult with only status == 0
-    failed = results.failed        # MultiResult with only status != 0
-
-    print(f"Succeeded: {len(succeeded)}, Failed: {len(failed)}")
-```
-
-### Handling partial failures
-```python
-from hussh.multi_conn import MultiConnection, PartialFailureException
-
-with MultiConnection(connections) as mc:
-    results = mc.execute("some_command")
-
-    # Option 1: Check and handle manually
-    if results.failed:
-        for host, result in results.failed.items():
-            print(f"Failed on {host}: {result.stderr}")
-
-    # Option 2: Raise an exception if any failed
-    try:
-        results.raise_if_any_failed()
-    except PartialFailureException as e:
-        print(f"Some hosts failed: {e}")
-        print(f"Succeeded: {list(e.succeeded.keys())}")
-        print(f"Failed: {list(e.failed.keys())}")
-```
-
-## SFTP Operations
-```python
-with MultiConnection(connections) as mc:
-    # Write data to all hosts
-    mc.sftp_write_data("config content", "/etc/myapp/config.txt")
-
-    # Write a local file to all hosts
-    mc.sftp_write("/local/path/file.txt", "/remote/path/file.txt")
-
-    # Read a file from all hosts
-    results = mc.sftp_read("/var/log/app.log")
-    for host, result in results.items():
-        print(f"=== {host} ===\n{result.stdout}")
-```
-
-## Tailing Files
-```python
-with MultiConnection(connections) as mc:
-    # Tail the same file on all hosts
-    with mc.tail("/var/log/syslog") as tailer:
-        # Do something that generates logs...
-        contents = tailer.read()
-        for host, content in contents.items():
-            print(f"{host}: {content}")
-
-    # Tail different files per host
-    file_map = {
-        "server1": "/var/log/nginx/access.log",
-        "server2": "/var/log/apache2/access.log",
-    }
-    with mc.tail_map(file_map) as tailer:
-        contents = tailer.read()
-```
-
-## Connection Management
-
-### Manual connect (without context manager)
-```python
-mc = MultiConnection(connections)
-connect_results = mc.connect()  # Explicitly connect
-
-# Check for connection failures
-if connect_results.failed:
-    print("Some connections failed!")
-
-results = mc.execute("whoami")
-mc.close()  # Don't forget to close!
-```
-
-### Pruning failed connections
-```python
-mc = MultiConnection(connections)
-
-# Remove hosts that fail to connect from the pool
-mc.connect(prune_failures=True)
-
-# Now mc only contains successfully connected hosts
-print(f"Connected to {len(mc.hosts)} hosts")
-results = mc.execute("whoami")  # Only runs on connected hosts
-mc.close()
-```
-
-## Controlling Concurrency
-The `batch_size` parameter limits how many operations run concurrently:
-
-```python
-# Connect to 1000 hosts, but only 50 concurrent operations at a time
-mc = MultiConnection.from_shared_auth(
-    hosts=large_host_list,
-    username="user",
-    password="pass",
-    batch_size=50,  # Prevents overwhelming resources
-)
-```
+| Guide | Description |
+|-------|-------------|
+| [Synchronous Usage](docs/synchronous.md) | Full `Connection` documentation: auth, SFTP, SCP, tailing, shells |
+| [Asynchronous Usage](docs/asynchronous.md) | Full `AsyncConnection` documentation: timeouts, async operations |
+| [MultiConnection Usage](docs/multi-connection.md) | Concurrent operations across multiple hosts |
 
 # Disclaimer
 This is an early project that should not be used in sensitive production code!
