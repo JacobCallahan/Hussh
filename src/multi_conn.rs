@@ -530,7 +530,7 @@ impl MultiConnection {
                             Ok(SSHResult {
                                 stdout: String::new(),
                                 stderr: format!(
-                                    "Operation timed out after {} seconds",
+                                    "Command execution timed out after {} seconds",
                                     timeout_secs
                                 ),
                                 status: -1,

@@ -23,17 +23,18 @@ class TestMultiConnectionConstructors:
         host_list = [host for host, _ in run_test_servers]
         port = run_test_servers[0][1]
 
+        BATCH_SIZE = 10
         mc = MultiConnection.from_shared_auth(
             host_list,
             username="root",
             password="toor",
             port=port,
-            batch_size=10,
+            batch_size=BATCH_SIZE,
         )
 
         # hosts are stored as hostname only
         assert mc.hosts == host_list
-        assert mc.batch_size == 10  # noqa: PLR2004
+        assert mc.batch_size == BATCH_SIZE
 
     def test_from_async_connections(self, run_test_servers):
         """Test creating MultiConnection from AsyncConnection instances."""
@@ -42,9 +43,10 @@ class TestMultiConnectionConstructors:
             conn = AsyncConnection(host, username="root", password="toor", port=port)
             connections.append(conn)
 
-        mc = MultiConnection(connections, batch_size=5)
+        BATCH_SIZE = 5
+        mc = MultiConnection(connections, batch_size=BATCH_SIZE)
         assert len(mc.hosts) == len(run_test_servers)
-        assert mc.batch_size == 5  # noqa: PLR2004
+        assert mc.batch_size == BATCH_SIZE
 
     def test_from_sync_connections(self, run_test_servers):
         """Test creating MultiConnection from sync Connection instances."""
@@ -53,9 +55,10 @@ class TestMultiConnectionConstructors:
             conn = Connection(host, port=port, username="root", password="toor")
             connections.append(conn)
 
-        mc = MultiConnection.from_connections(connections, batch_size=20)
+        BATCH_SIZE = 20
+        mc = MultiConnection.from_connections(connections, batch_size=BATCH_SIZE)
         assert len(mc.hosts) == len(run_test_servers)
-        assert mc.batch_size == 20  # noqa: PLR2004
+        assert mc.batch_size == BATCH_SIZE
 
         # Clean up sync connections
         for conn in connections:
@@ -312,11 +315,13 @@ class TestMultiFileTailer:
         with MultiConnection(connections) as mc:
             # Create different files on each host
             file_map = {}
+            command_map = {}
             for i, host in enumerate(mc.hosts):
                 file_path = f"/tmp/tail_test_{i}.log"
                 file_map[host] = file_path
-                # Execute on each host individually to create different files
-                mc.execute_map({host: f"echo 'content for host {i}' > {file_path}"})
+                command_map[host] = f"echo 'content for host {i}' > {file_path}"
+            # Execute all commands concurrently
+            mc.execute_map(command_map)
 
             # Tail different files
             with mc.tail_map(file_map) as tailer:
@@ -383,5 +388,5 @@ class TestMultiConnectionEdgeCases:
 
             for host in mc.hosts:
                 # Should have timed out
-                assert results[host].status != 0
+                assert results[host].status == -1
                 assert "timed out" in results[host].stderr.lower()

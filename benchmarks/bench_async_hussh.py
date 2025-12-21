@@ -89,7 +89,7 @@ async def _do_benchmark(task_id):
 
 
 async def main():
-    semaphore = asyncio.Semaphore(20)  # Limit to 20 concurrent connections
+    semaphore = asyncio.Semaphore(100)  # Limit to 100 concurrent connections
 
     # Single task
     print("Running single task benchmark...")
