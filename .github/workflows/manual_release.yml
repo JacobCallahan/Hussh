@@ -1,0 +1,77 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+      release_name:
+        description: 'Release name (short title)'
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper tagging
+
+      - name: Get current version
+        id: current_version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "current_version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Calculate new version
+        id: new_version
+        run: |
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${{ steps.current_version.outputs.current_version }}"
+          case "${{ inputs.release_type }}" in
+            major)
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEW_VERSION="$MAJOR.$((MINOR + 1)).0"
+              ;;
+            patch)
+              NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+              ;;
+          esac
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.new_version.outputs.new_version }}"/' Cargo.toml
+
+      - name: Commit version bump
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml
+          git commit -m "Bump version to ${{ steps.new_version.outputs.new_version }}"
+          git push origin HEAD
+
+      - name: Create and push tag
+        run: |
+          git tag ${{ steps.new_version.outputs.new_version }}
+          git push origin ${{ steps.new_version.outputs.new_version }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.new_version.outputs.new_version }}
+          name: ${{ inputs.release_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
