@@ -1,4 +1,4 @@
-name: Manual Release
+name: Trigger Release
 
 on:
   workflow_dispatch:
@@ -26,6 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Fetch all history for proper tagging
+          token: ${{ secrets.GH_PAT }}
 
       - name: Get current version
         id: current_version
@@ -50,9 +51,11 @@ jobs:
           esac
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Update Cargo.toml
+      - name: Update Cargo.toml and Cargo.lock
         run: |
           sed -i 's/^version = ".*"/version = "${{ steps.new_version.outputs.new_version }}"/' Cargo.toml
+          # Update Cargo.lock to match the new version
+          cargo check
 
       - name: Commit version bump
         run: |
@@ -74,4 +77,4 @@ jobs:
           name: ${{ inputs.release_name }}
           generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
