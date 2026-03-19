@@ -601,10 +601,7 @@ impl Connection {
             match self.sftp().mkdir(Path::new(&remote_path), 0o755) {
                 Ok(_) => {}
                 Err(e) => {
-                    let msg = format!(
-                        "Failed to create remote directory '{}': {}",
-                        remote_path, e
-                    );
+                    let msg = format!("Failed to create remote directory '{}': {}", remote_path, e);
                     if fail_fast {
                         return Err(PyErr::new::<PyIOError, _>(msg));
                     }
@@ -711,7 +708,11 @@ impl Connection {
                             .map_err(|e| format!("Remote file creation error: {}", e))?;
                         let buf_size = (file_size as usize).min(MAX_BUFF_SIZE);
                         // Fall back to MAX_BUFF_SIZE for empty files (size 0) so the read loop can still run.
-                        let buf_size = if buf_size == 0 { MAX_BUFF_SIZE } else { buf_size };
+                        let buf_size = if buf_size == 0 {
+                            MAX_BUFF_SIZE
+                        } else {
+                            buf_size
+                        };
                         let mut buffer = vec![0u8; buf_size];
                         loop {
                             let n = local_file
@@ -779,10 +780,7 @@ impl Connection {
 
         // Ensure local base directory exists
         if let Err(e) = std::fs::create_dir_all(&local_path) {
-            let msg = format!(
-                "Failed to create local directory '{}': {}",
-                local_path, e
-            );
+            let msg = format!("Failed to create local directory '{}': {}", local_path, e);
             if fail_fast {
                 return Err(PyErr::new::<PyIOError, _>(msg));
             }
@@ -887,9 +885,7 @@ impl Connection {
                                 .write_all(&buffer[..n])
                                 .map_err(|e| format!("File write error: {}", e))?;
                         }
-                        writer
-                            .flush()
-                            .map_err(|e| format!("Flush error: {}", e))?;
+                        writer.flush().map_err(|e| format!("Flush error: {}", e))?;
                         #[cfg(unix)]
                         if preserve_permissions {
                             if let Some(perm) = resolved_stat.perm {

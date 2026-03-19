@@ -621,10 +621,7 @@ impl AsyncConnection {
             match sftp.create_dir(&remote_path).await {
                 Ok(_) => {}
                 Err(e) => {
-                    let msg = format!(
-                        "Failed to create remote directory '{}': {}",
-                        remote_path, e
-                    );
+                    let msg = format!("Failed to create remote directory '{}': {}", remote_path, e);
                     if fail_fast {
                         return Err(PyRuntimeError::new_err(msg));
                     }
@@ -795,10 +792,7 @@ impl AsyncConnection {
         match tokio::fs::create_dir_all(&local_path).await {
             Ok(_) => {}
             Err(e) => {
-                let msg = format!(
-                    "Failed to create local directory '{}': {}",
-                    local_path, e
-                );
+                let msg = format!("Failed to create local directory '{}': {}", local_path, e);
                 if fail_fast {
                     return Err(PyRuntimeError::new_err(msg));
                 }
@@ -942,7 +936,6 @@ impl AsyncConnection {
 
         Ok((transferred, failed))
     }
-
 
     pub(crate) fn create(
         host: String,
@@ -1175,7 +1168,6 @@ impl AsyncConnection {
             .await
         })
     }
-
 
     fn shell<'p>(&self, py: Python<'p>, pty: Option<bool>) -> PyResult<Bound<'p, PyAny>> {
         let session_arc = self.session.clone();
