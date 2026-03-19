@@ -715,8 +715,10 @@ impl AsyncConnection {
                     if preserve_permissions {
                         use std::os::unix::fs::PermissionsExt;
                         let mode = metadata.permissions().mode();
-                        let mut attrs = russh_sftp::client::fs::Metadata::default();
-                        attrs.permissions = Some(mode);
+                        let attrs = russh_sftp::client::fs::Metadata {
+                            permissions: Some(mode),
+                            ..Default::default()
+                        };
                         let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
                     }
                     dirs_to_process.push((local_entry, remote_entry));
@@ -747,8 +749,10 @@ impl AsyncConnection {
                         if preserve_permissions {
                             use std::os::unix::fs::PermissionsExt;
                             let mode = metadata.permissions().mode();
-                            let mut attrs = russh_sftp::client::fs::Metadata::default();
-                            attrs.permissions = Some(mode);
+                            let attrs = russh_sftp::client::fs::Metadata {
+                                permissions: Some(mode),
+                                ..Default::default()
+                            };
                             let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
                         }
                         Ok(())

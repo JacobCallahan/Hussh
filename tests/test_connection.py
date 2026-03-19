@@ -231,7 +231,8 @@ def test_sftp_put_dir(conn, tmp_path):
     assert "file1.txt" in remote_ls
     assert "file2.txt" in remote_ls
     assert "nested.txt" in remote_ls
-    assert len(transferred) == 3
+    expected_file_count = 3
+    assert len(transferred) == expected_file_count
     assert len(failed) == 0
     # Transferred list contains local paths
     assert any("file1.txt" in p for p in transferred)
@@ -260,7 +261,8 @@ def test_sftp_get_dir(conn, tmp_path):
     assert (dest / "file1.txt").read_text() == "remote file 1"
     assert (dest / "file2.txt").read_text() == "remote file 2"
     assert (dest / "subdir" / "nested.txt").read_text() == "nested remote"
-    assert len(transferred) == 3
+    expected_file_count = 3
+    assert len(transferred) == expected_file_count
     assert len(failed) == 0
     # Transferred list contains remote paths
     assert any("file1.txt" in p for p in transferred)
@@ -271,23 +273,19 @@ def test_sftp_get_dir(conn, tmp_path):
 
 def test_sftp_put_dir_fail_fast(conn, tmp_path):
     """Test that sftp_put_dir with fail_fast=True raises on error."""
-    import pytest
-
     src = tmp_path / "src_fail"
     src.mkdir()
     (src / "ok.txt").write_text("ok")
 
     # Try to upload to a path whose parent doesn't exist (invalid path)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
         conn.sftp_put_dir(str(src), "/nonexistent_parent/deep/path", fail_fast=True)
 
 
 def test_sftp_get_dir_fail_fast(conn, tmp_path):
     """Test that sftp_get_dir with fail_fast=True raises on error."""
-    import pytest
-
     dest = tmp_path / "dest_fail"
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
         conn.sftp_get_dir("/path/does/not/exist", str(dest), fail_fast=True)
 
 

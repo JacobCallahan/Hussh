@@ -87,7 +87,8 @@ async def test_async_sftp_put_dir(run_test_server, tmp_path):
         assert "file1.txt" in remote_ls
         assert "file2.txt" in remote_ls
         assert "nested.txt" in remote_ls
-        assert len(transferred) == 3
+        expected_file_count = 3
+        assert len(transferred) == expected_file_count
         assert len(failed) == 0
         assert any("file1.txt" in p for p in transferred)
 
@@ -107,9 +108,7 @@ async def test_async_sftp_get_dir(run_test_server, tmp_path):
         await conn.execute("mkdir -p /root/async_test_get_dir/subdir")
         await conn.sftp_write_data("remote file 1", "/root/async_test_get_dir/file1.txt")
         await conn.sftp_write_data("remote file 2", "/root/async_test_get_dir/file2.txt")
-        await conn.sftp_write_data(
-            "nested remote", "/root/async_test_get_dir/subdir/nested.txt"
-        )
+        await conn.sftp_write_data("nested remote", "/root/async_test_get_dir/subdir/nested.txt")
 
         # Download to local
         dest = tmp_path / "async_dest_dir"
@@ -119,7 +118,8 @@ async def test_async_sftp_get_dir(run_test_server, tmp_path):
         assert (dest / "file1.txt").read_text() == "remote file 1"
         assert (dest / "file2.txt").read_text() == "remote file 2"
         assert (dest / "subdir" / "nested.txt").read_text() == "nested remote"
-        assert len(transferred) == 3
+        expected_file_count = 3
+        assert len(transferred) == expected_file_count
         assert len(failed) == 0
         assert any("file1.txt" in p for p in transferred)
 
