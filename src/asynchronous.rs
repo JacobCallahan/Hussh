@@ -98,7 +98,7 @@
 //! print(tailer.contents)
 //! ```
 
-use crate::connection::SSHResult;
+use crate::connection::{SSHResult, MAX_BUFF_SIZE};
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
@@ -516,7 +516,7 @@ impl AsyncConnection {
                 PyRuntimeError::new_err(format!("Failed to create local file: {}", e))
             })?;
 
-            let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
+            let mut buffer = vec![0u8; MAX_BUFF_SIZE];
             loop {
                 let n = remote_file.read(&mut buffer).await.map_err(|e| {
                     PyRuntimeError::new_err(format!("Failed to read remote file: {}", e))
@@ -560,7 +560,7 @@ impl AsyncConnection {
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to create remote file: {}", e)))?;
 
-        let mut buffer = vec![0u8; 65536]; // 64KB buffer to match sync version
+        let mut buffer = vec![0u8; MAX_BUFF_SIZE];
         loop {
             let n = local_file.read(&mut buffer).await.map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to read local file: {}", e))
@@ -687,7 +687,7 @@ impl AsyncConnection {
                             remote_entry_str, e
                         ))
                     })?;
-                    let mut buffer = vec![0u8; 65536];
+                    let mut buffer = vec![0u8; MAX_BUFF_SIZE];
                     loop {
                         let n = local_file.read(&mut buffer).await.map_err(|e| {
                             PyRuntimeError::new_err(format!("File read error: {}", e))
@@ -807,7 +807,7 @@ impl AsyncConnection {
                         tokio::fs::File::create(&local_entry).await.map_err(|e| {
                             PyRuntimeError::new_err(format!("File create error: {}", e))
                         })?;
-                    let mut buffer = vec![0u8; 65536];
+                    let mut buffer = vec![0u8; MAX_BUFF_SIZE];
                     loop {
                         let n = remote_file.read(&mut buffer).await.map_err(|e| {
                             PyRuntimeError::new_err(format!("File read error: {}", e))
