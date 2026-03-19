@@ -212,6 +212,59 @@ def test_sftp_write_data(conn):
     assert read_text == "hello"
 
 
+def test_sftp_put_dir(conn, tmp_path):
+    """Test that we can recursively upload a directory tree over SFTP."""
+    # Create a local directory tree
+    src = tmp_path / "src_dir"
+    src.mkdir()
+    (src / "file1.txt").write_text("file1 content")
+    (src / "file2.txt").write_text("file2 content")
+    sub = src / "subdir"
+    sub.mkdir()
+    (sub / "nested.txt").write_text("nested content")
+
+    # Upload to remote
+    files_copied, bytes_transferred = conn.sftp_put_dir(str(src), "/root/test_put_dir")
+
+    # Verify files exist on remote
+    remote_ls = conn.execute("find /root/test_put_dir -type f | sort").stdout
+    assert "file1.txt" in remote_ls
+    assert "file2.txt" in remote_ls
+    assert "nested.txt" in remote_ls
+    assert files_copied == 3
+    assert bytes_transferred > 0
+
+    # Verify nested file contents
+    content = conn.sftp_read("/root/test_put_dir/subdir/nested.txt")
+    assert content == "nested content"
+
+    # Cleanup
+    conn.execute("rm -rf /root/test_put_dir")
+
+
+def test_sftp_get_dir(conn, tmp_path):
+    """Test that we can recursively download a directory tree over SFTP."""
+    # Set up a remote directory tree
+    conn.execute("mkdir -p /root/test_get_dir/subdir")
+    conn.sftp_write_data("remote file 1", "/root/test_get_dir/file1.txt")
+    conn.sftp_write_data("remote file 2", "/root/test_get_dir/file2.txt")
+    conn.sftp_write_data("nested remote", "/root/test_get_dir/subdir/nested.txt")
+
+    # Download to local
+    dest = tmp_path / "dest_dir"
+    files_copied, bytes_transferred = conn.sftp_get_dir("/root/test_get_dir", str(dest))
+
+    # Verify local files
+    assert (dest / "file1.txt").read_text() == "remote file 1"
+    assert (dest / "file2.txt").read_text() == "remote file 2"
+    assert (dest / "subdir" / "nested.txt").read_text() == "nested remote"
+    assert files_copied == 3
+    assert bytes_transferred > 0
+
+    # Cleanup
+    conn.execute("rm -rf /root/test_get_dir")
+
+
 @pytest.mark.skip("non-text files are not supported by sftp")
 def test_non_utf8_sftp(conn):
     """Test that we can copy a non-text file to the server and read it back."""

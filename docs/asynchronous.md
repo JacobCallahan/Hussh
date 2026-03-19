@@ -207,6 +207,32 @@ async with AsyncConnection(host="my.test.server", password="pass") as conn:
         print(file)
 ```
 
+### Directory Transfers
+
+Upload or download entire directory trees with a single awaitable call. Both methods return a tuple of `(files_copied, bytes_transferred)`.
+
+```python
+async with AsyncConnection(host="my.test.server", password="pass") as conn:
+    # Upload an entire local directory to the remote server
+    files_copied, bytes_transferred = await conn.sftp_put_dir(
+        local_path="/local/build/",
+        remote_path="/remote/app/",
+    )
+
+    # Download an entire remote directory to a local destination
+    files_copied, bytes_transferred = await conn.sftp_get_dir(
+        remote_path="/remote/logs/",
+        local_path="/local/logs/",
+    )
+```
+
+Optional keyword arguments control symlink and permission behaviour:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `follow_symlinks` | `True` | Follow symlinks; set `False` to skip them |
+| `preserve_permissions` | `True` | Mirror source permissions on the destination |
+
 ### Concurrent File Operations
 
 ```python

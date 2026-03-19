@@ -123,6 +123,35 @@ contents = conn.sftp_read(remote_path="/dest/path/file")
 print(contents)
 ```
 
+### Directory Transfers
+
+Upload or download entire directory trees with a single call. Both methods return a tuple of `(files_copied, bytes_transferred)`.
+
+```python
+# Upload an entire local directory to the remote server
+files_copied, bytes_transferred = conn.sftp_put_dir(
+    local_path="/local/build/",
+    remote_path="/remote/app/",
+)
+
+# Download an entire remote directory to a local destination
+files_copied, bytes_transferred = conn.sftp_get_dir(
+    remote_path="/remote/logs/",
+    local_path="/local/logs/",
+)
+```
+
+Optional keyword arguments control symlink and permission behaviour:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `follow_symlinks` | `True` | Follow symlinks; set `False` to skip them |
+| `preserve_permissions` | `True` | Mirror source permissions on the destination |
+
+```python
+conn.sftp_put_dir("/src/", "/dst/", follow_symlinks=False, preserve_permissions=False)
+```
+
 ### Copy Files Between Connections
 
 Hussh provides a convenient way to copy files between two remote servers:
