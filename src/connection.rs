@@ -67,7 +67,7 @@ use std::path::Path;
 
 use pyo3::exceptions::{PyIOError, PyTimeoutError};
 
-const MAX_BUFF_SIZE: usize = 65536;
+pub(crate) const MAX_BUFF_SIZE: usize = 65536;
 create_exception!(
     connection,
     AuthenticationError,
@@ -676,7 +676,7 @@ impl Connection {
                                 remote_entry_str, e
                             ))
                         })?;
-                    let buf_size = (file_size as usize).min(MAX_BUFF_SIZE).max(1);
+                    let buf_size = (file_size as usize).min(MAX_BUFF_SIZE);
                     let mut buffer = vec![0u8; buf_size];
                     loop {
                         let n = local_file.read(&mut buffer).map_err(|e| {
