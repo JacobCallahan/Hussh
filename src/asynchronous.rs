@@ -574,6 +574,10 @@ impl AsyncConnection {
                 PyRuntimeError::new_err(format!("Failed to write remote file: {}", e))
             })?
         }
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to flush remote file: {}", e)))?;
         Ok(())
     }
 
@@ -596,6 +600,11 @@ impl AsyncConnection {
             .write_all(data.as_bytes())
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to write remote file: {}", e)))?;
+
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to flush remote file: {}", e)))?;
 
         Ok(())
     }
@@ -742,6 +751,10 @@ impl AsyncConnection {
                                 .await
                                 .map_err(|e| format!("Remote write error: {}", e))?;
                         }
+                        remote_file
+                            .shutdown()
+                            .await
+                            .map_err(|e| format!("Remote file flush error: {}", e))?;
                         #[cfg(unix)]
                         if preserve_permissions {
                             use std::os::unix::fs::PermissionsExt;
