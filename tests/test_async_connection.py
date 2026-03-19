@@ -80,17 +80,16 @@ async def test_async_sftp_put_dir(run_test_server, tmp_path):
         (sub / "nested.txt").write_text("nested content")
 
         # Upload to remote
-        files_copied, bytes_transferred = await conn.sftp_put_dir(
-            str(src), "/root/async_test_put_dir"
-        )
+        transferred, failed = await conn.sftp_put_dir(str(src), "/root/async_test_put_dir")
 
         # Verify files exist on remote
         remote_ls = (await conn.execute("find /root/async_test_put_dir -type f | sort")).stdout
         assert "file1.txt" in remote_ls
         assert "file2.txt" in remote_ls
         assert "nested.txt" in remote_ls
-        assert files_copied == 3
-        assert bytes_transferred > 0
+        assert len(transferred) == 3
+        assert len(failed) == 0
+        assert any("file1.txt" in p for p in transferred)
 
         # Verify nested file contents
         content = await conn.sftp_read("/root/async_test_put_dir/subdir/nested.txt")
@@ -114,19 +113,27 @@ async def test_async_sftp_get_dir(run_test_server, tmp_path):
 
         # Download to local
         dest = tmp_path / "async_dest_dir"
-        files_copied, bytes_transferred = await conn.sftp_get_dir(
-            "/root/async_test_get_dir", str(dest)
-        )
+        transferred, failed = await conn.sftp_get_dir("/root/async_test_get_dir", str(dest))
 
         # Verify local files
         assert (dest / "file1.txt").read_text() == "remote file 1"
         assert (dest / "file2.txt").read_text() == "remote file 2"
         assert (dest / "subdir" / "nested.txt").read_text() == "nested remote"
-        assert files_copied == 3
-        assert bytes_transferred > 0
+        assert len(transferred) == 3
+        assert len(failed) == 0
+        assert any("file1.txt" in p for p in transferred)
 
         # Cleanup
         await conn.execute("rm -rf /root/async_test_get_dir")
+
+
+@pytest.mark.asyncio
+async def test_async_sftp_get_dir_fail_fast(run_test_server, tmp_path):
+    """Test that sftp_get_dir with fail_fast=True raises on error."""
+    async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
+        dest = tmp_path / "async_dest_fail"
+        with pytest.raises(RuntimeError):
+            await conn.sftp_get_dir("/path/does/not/exist", str(dest), fail_fast=True)
 
 
 @pytest.mark.asyncio

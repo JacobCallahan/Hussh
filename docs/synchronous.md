@@ -125,30 +125,37 @@ print(contents)
 
 ### Directory Transfers
 
-Upload or download entire directory trees with a single call. Both methods return a tuple of `(files_copied, bytes_transferred)`.
+Upload or download entire directory trees with a single call. Both methods return a tuple of `(transferred_files, failed_files)`, where each is a list of file paths.
 
 ```python
 # Upload an entire local directory to the remote server
-files_copied, bytes_transferred = conn.sftp_put_dir(
+transferred, failed = conn.sftp_put_dir(
     local_path="/local/build/",
     remote_path="/remote/app/",
 )
+if failed:
+    print(f"Failed to upload: {failed}")
 
 # Download an entire remote directory to a local destination
-files_copied, bytes_transferred = conn.sftp_get_dir(
+transferred, failed = conn.sftp_get_dir(
     remote_path="/remote/logs/",
     local_path="/local/logs/",
 )
 ```
 
-Optional keyword arguments control symlink and permission behaviour:
+Optional keyword arguments control symlink, permission, and error-handling behaviour:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `follow_symlinks` | `True` | Follow symlinks; set `False` to skip them |
 | `preserve_permissions` | `True` | Mirror source permissions on the destination |
+| `fail_fast` | `False` | Raise on the first error instead of collecting failures |
 
 ```python
+# Raise immediately on the first error
+conn.sftp_put_dir("/src/", "/dst/", fail_fast=True)
+
+# Skip symlinks and don't mirror permissions
 conn.sftp_put_dir("/src/", "/dst/", follow_symlinks=False, preserve_permissions=False)
 ```
 

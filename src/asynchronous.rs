@@ -81,10 +81,10 @@
 //! files = await conn.sftp_list("/remote/path")
 //!
 //! # Upload an entire local directory recursively
-//! files_copied, bytes_transferred = await conn.sftp_put_dir("/local/build/", "/remote/app/")
+//! transferred, failed = await conn.sftp_put_dir("/local/build/", "/remote/app/")
 //!
 //! # Download an entire remote directory recursively
-//! files_copied, bytes_transferred = await conn.sftp_get_dir("/remote/logs/", "/local/logs/")
+//! transferred, failed = await conn.sftp_get_dir("/remote/logs/", "/local/logs/")
 //! ```
 //!
 //! For file tailing:
@@ -230,21 +230,23 @@ impl Handler for ClientHandler {
 ///
 /// ### `sftp_put_dir`
 ///
-/// Uploads a local directory recursively to a remote path over SFTP. Returns (files_copied, bytes_transferred). It takes the following parameters:
+/// Uploads a local directory recursively to a remote path over SFTP. Returns (transferred_files, failed_files). It takes the following parameters:
 ///
 /// * `local_path`: The local directory to upload.
 /// * `remote_path`: The remote destination path.
 /// * `follow_symlinks`: Whether to follow symlinks (default: true).
 /// * `preserve_permissions`: Whether to preserve file permissions (default: true).
+/// * `fail_fast`: Whether to raise an exception on the first error instead of collecting failures (default: false).
 ///
 /// ### `sftp_get_dir`
 ///
-/// Downloads a remote directory recursively to a local path over SFTP. Returns (files_copied, bytes_transferred). It takes the following parameters:
+/// Downloads a remote directory recursively to a local path over SFTP. Returns (transferred_files, failed_files). It takes the following parameters:
 ///
 /// * `remote_path`: The remote directory to download.
 /// * `local_path`: The local destination path.
 /// * `follow_symlinks`: Whether to follow symlinks (default: true).
 /// * `preserve_permissions`: Whether to preserve file permissions (default: true).
+/// * `fail_fast`: Whether to raise an exception on the first error instead of collecting failures (default: false).
 ///
 /// ### `shell`
 ///
@@ -605,22 +607,31 @@ impl AsyncConnection {
         remote_path: String,
         follow_symlinks: bool,
         preserve_permissions: bool,
-    ) -> PyResult<(u64, u64)> {
+        fail_fast: bool,
+    ) -> PyResult<(Vec<String>, Vec<String>)> {
         let sftp =
             AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
                 .await?;
 
-        let mut files_copied = 0u64;
-        let mut bytes_transferred = 0u64;
+        let mut transferred: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
 
         // Ensure remote base directory exists
         if !sftp.try_exists(&remote_path).await.unwrap_or(false) {
-            sftp.create_dir(&remote_path).await.map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "Failed to create remote directory '{}': {}",
-                    remote_path, e
-                ))
-            })?;
+            match sftp.create_dir(&remote_path).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = format!(
+                        "Failed to create remote directory '{}': {}",
+                        remote_path, e
+                    );
+                    if fail_fast {
+                        return Err(PyRuntimeError::new_err(msg));
+                    }
+                    failed.push(remote_path);
+                    return Ok((transferred, failed));
+                }
+            }
         }
 
         // Stack for depth-first traversal: (local_dir, remote_dir)
@@ -630,42 +641,75 @@ impl AsyncConnection {
         )];
 
         while let Some((local_dir, remote_dir)) = dirs_to_process.pop() {
-            let mut read_dir = tokio::fs::read_dir(&local_dir).await.map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "Failed to read local directory '{}': {}",
-                    local_dir.display(),
-                    e
-                ))
-            })?;
+            let mut read_dir = match tokio::fs::read_dir(&local_dir).await {
+                Ok(d) => d,
+                Err(e) => {
+                    let msg = format!(
+                        "Failed to read local directory '{}': {}",
+                        local_dir.display(),
+                        e
+                    );
+                    if fail_fast {
+                        return Err(PyRuntimeError::new_err(msg));
+                    }
+                    failed.push(local_dir.to_string_lossy().to_string());
+                    continue;
+                }
+            };
 
-            while let Some(entry) = read_dir.next_entry().await.map_err(|e| {
-                PyRuntimeError::new_err(format!("Directory entry error: {}", e))
-            })? {
+            loop {
+                let entry = match read_dir.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if fail_fast {
+                            return Err(PyRuntimeError::new_err(format!(
+                                "Directory entry error: {}",
+                                e
+                            )));
+                        }
+                        continue;
+                    }
+                };
+
                 let local_entry = entry.path();
+                let local_entry_str = local_entry.to_string_lossy().to_string();
                 let remote_entry = remote_dir.join(entry.file_name());
                 let remote_entry_str = remote_entry.to_string_lossy().to_string();
 
-                let metadata = if follow_symlinks {
+                let metadata = match if follow_symlinks {
                     tokio::fs::metadata(&local_entry).await
                 } else {
                     tokio::fs::symlink_metadata(&local_entry).await
-                }
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "Metadata error for '{}': {}",
-                        local_entry.display(),
-                        e
-                    ))
-                })?;
+                } {
+                    Ok(m) => m,
+                    Err(e) => {
+                        if fail_fast {
+                            return Err(PyRuntimeError::new_err(format!(
+                                "Metadata error for '{}': {}",
+                                local_entry_str, e
+                            )));
+                        }
+                        failed.push(local_entry_str);
+                        continue;
+                    }
+                };
 
                 if metadata.is_dir() {
                     if !sftp.try_exists(&remote_entry_str).await.unwrap_or(false) {
-                        sftp.create_dir(&remote_entry_str).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!(
-                                "Failed to create remote directory '{}': {}",
-                                remote_entry_str, e
-                            ))
-                        })?;
+                        match sftp.create_dir(&remote_entry_str).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                if fail_fast {
+                                    return Err(PyRuntimeError::new_err(format!(
+                                        "Failed to create remote directory '{}': {}",
+                                        remote_entry_str, e
+                                    )));
+                                }
+                                failed.push(local_entry_str);
+                                continue;
+                            }
+                        }
                     }
                     #[cfg(unix)]
                     if preserve_permissions {
@@ -677,44 +721,54 @@ impl AsyncConnection {
                     }
                     dirs_to_process.push((local_entry, remote_entry));
                 } else if metadata.is_file() {
-                    let mut local_file =
-                        tokio::fs::File::open(&local_entry).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!("File open error: {}", e))
-                        })?;
-                    let mut remote_file = sftp.create(&remote_entry_str).await.map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "Remote file creation error '{}': {}",
-                            remote_entry_str, e
-                        ))
-                    })?;
-                    let mut buffer = vec![0u8; MAX_BUFF_SIZE];
-                    loop {
-                        let n = local_file.read(&mut buffer).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!("File read error: {}", e))
-                        })?;
-                        if n == 0 {
-                            break;
+                    let transfer_result: Result<(), String> = async {
+                        let mut local_file = tokio::fs::File::open(&local_entry)
+                            .await
+                            .map_err(|e| format!("File open error: {}", e))?;
+                        let mut remote_file = sftp
+                            .create(&remote_entry_str)
+                            .await
+                            .map_err(|e| format!("Remote file creation error: {}", e))?;
+                        let mut buffer = vec![0u8; MAX_BUFF_SIZE];
+                        loop {
+                            let n = local_file
+                                .read(&mut buffer)
+                                .await
+                                .map_err(|e| format!("File read error: {}", e))?;
+                            if n == 0 {
+                                break;
+                            }
+                            remote_file
+                                .write_all(&buffer[..n])
+                                .await
+                                .map_err(|e| format!("Remote write error: {}", e))?;
                         }
-                        remote_file.write_all(&buffer[..n]).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!("Remote write error: {}", e))
-                        })?;
-                        bytes_transferred += n as u64;
+                        #[cfg(unix)]
+                        if preserve_permissions {
+                            use std::os::unix::fs::PermissionsExt;
+                            let mode = metadata.permissions().mode();
+                            let mut attrs = russh_sftp::client::fs::Metadata::default();
+                            attrs.permissions = Some(mode);
+                            let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
+                        }
+                        Ok(())
                     }
-                    #[cfg(unix)]
-                    if preserve_permissions {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mode = metadata.permissions().mode();
-                        let mut attrs = russh_sftp::client::fs::Metadata::default();
-                        attrs.permissions = Some(mode);
-                        let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
+                    .await;
+                    match transfer_result {
+                        Ok(_) => transferred.push(local_entry_str),
+                        Err(e) => {
+                            if fail_fast {
+                                return Err(PyRuntimeError::new_err(e));
+                            }
+                            failed.push(local_entry_str);
+                        }
                     }
-                    files_copied += 1;
                 }
                 // Symlinks with follow_symlinks=false are skipped
             }
         }
 
-        Ok((files_copied, bytes_transferred))
+        Ok((transferred, failed))
     }
 
     /// Internal async SFTP get_dir implementation
@@ -724,21 +778,30 @@ impl AsyncConnection {
         local_path: String,
         follow_symlinks: bool,
         preserve_permissions: bool,
-    ) -> PyResult<(u64, u64)> {
+        fail_fast: bool,
+    ) -> PyResult<(Vec<String>, Vec<String>)> {
         let sftp =
             AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
                 .await?;
 
-        let mut files_copied = 0u64;
-        let mut bytes_transferred = 0u64;
+        let mut transferred: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
 
         // Ensure local base directory exists
-        tokio::fs::create_dir_all(&local_path).await.map_err(|e| {
-            PyRuntimeError::new_err(format!(
-                "Failed to create local directory '{}': {}",
-                local_path, e
-            ))
-        })?;
+        match tokio::fs::create_dir_all(&local_path).await {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = format!(
+                    "Failed to create local directory '{}': {}",
+                    local_path, e
+                );
+                if fail_fast {
+                    return Err(PyRuntimeError::new_err(msg));
+                }
+                failed.push(remote_path);
+                return Ok((transferred, failed));
+            }
+        }
 
         // Stack for depth-first traversal: (remote_dir, local_dir)
         let mut dirs_to_process: Vec<(std::path::PathBuf, std::path::PathBuf)> = vec![(
@@ -748,12 +811,20 @@ impl AsyncConnection {
 
         while let Some((remote_dir, local_dir)) = dirs_to_process.pop() {
             let remote_dir_str = remote_dir.to_string_lossy().to_string();
-            let read_dir = sftp.read_dir(&remote_dir_str).await.map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "Failed to read remote directory '{}': {}",
-                    remote_dir_str, e
-                ))
-            })?;
+            let read_dir = match sftp.read_dir(&remote_dir_str).await {
+                Ok(d) => d,
+                Err(e) => {
+                    let msg = format!(
+                        "Failed to read remote directory '{}': {}",
+                        remote_dir_str, e
+                    );
+                    if fail_fast {
+                        return Err(PyRuntimeError::new_err(msg));
+                    }
+                    failed.push(remote_dir_str);
+                    continue;
+                }
+            };
 
             for entry in read_dir {
                 let file_name = entry.file_name();
@@ -775,13 +846,20 @@ impl AsyncConnection {
                     // follow_symlinks=false: skip symlinks
                     continue;
                 } else if file_type.is_dir() {
-                    tokio::fs::create_dir_all(&local_entry).await.map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "Failed to create local directory '{}': {}",
-                            local_entry.display(),
-                            e
-                        ))
-                    })?;
+                    match tokio::fs::create_dir_all(&local_entry).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            if fail_fast {
+                                return Err(PyRuntimeError::new_err(format!(
+                                    "Failed to create local directory '{}': {}",
+                                    local_entry.display(),
+                                    e
+                                )));
+                            }
+                            failed.push(remote_entry_str);
+                            continue;
+                        }
+                    }
                     #[cfg(unix)]
                     if preserve_permissions {
                         if let Some(perm) = sftp
@@ -800,51 +878,65 @@ impl AsyncConnection {
                     }
                     dirs_to_process.push((remote_entry, local_entry));
                 } else if file_type.is_file() {
-                    let mut remote_file = sftp.open(&remote_entry_str).await.map_err(|e| {
-                        PyRuntimeError::new_err(format!("SFTP open error: {}", e))
-                    })?;
-                    let mut local_file =
-                        tokio::fs::File::create(&local_entry).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!("File create error: {}", e))
-                        })?;
-                    let mut buffer = vec![0u8; MAX_BUFF_SIZE];
-                    loop {
-                        let n = remote_file.read(&mut buffer).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!("File read error: {}", e))
-                        })?;
-                        if n == 0 {
-                            break;
-                        }
-                        local_file.write_all(&buffer[..n]).await.map_err(|e| {
-                            PyRuntimeError::new_err(format!("File write error: {}", e))
-                        })?;
-                        bytes_transferred += n as u64;
-                    }
-                    local_file.flush().await.map_err(|e| {
-                        PyRuntimeError::new_err(format!("Flush error: {}", e))
-                    })?;
-                    #[cfg(unix)]
-                    if preserve_permissions {
-                        if let Some(perm) = sftp
-                            .metadata(&remote_entry_str)
+                    let transfer_result: Result<(), String> = async {
+                        let mut remote_file = sftp
+                            .open(&remote_entry_str)
                             .await
-                            .ok()
-                            .and_then(|m| m.permissions)
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = tokio::fs::set_permissions(
-                                &local_entry,
-                                std::fs::Permissions::from_mode(perm & 0o7777),
-                            )
-                            .await;
+                            .map_err(|e| format!("SFTP open error: {}", e))?;
+                        let mut local_file = tokio::fs::File::create(&local_entry)
+                            .await
+                            .map_err(|e| format!("File create error: {}", e))?;
+                        let mut buffer = vec![0u8; MAX_BUFF_SIZE];
+                        loop {
+                            let n = remote_file
+                                .read(&mut buffer)
+                                .await
+                                .map_err(|e| format!("File read error: {}", e))?;
+                            if n == 0 {
+                                break;
+                            }
+                            local_file
+                                .write_all(&buffer[..n])
+                                .await
+                                .map_err(|e| format!("File write error: {}", e))?;
+                        }
+                        local_file
+                            .flush()
+                            .await
+                            .map_err(|e| format!("Flush error: {}", e))?;
+                        #[cfg(unix)]
+                        if preserve_permissions {
+                            if let Some(perm) = sftp
+                                .metadata(&remote_entry_str)
+                                .await
+                                .ok()
+                                .and_then(|m| m.permissions)
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = tokio::fs::set_permissions(
+                                    &local_entry,
+                                    std::fs::Permissions::from_mode(perm & 0o7777),
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    match transfer_result {
+                        Ok(_) => transferred.push(remote_entry_str),
+                        Err(e) => {
+                            if fail_fast {
+                                return Err(PyRuntimeError::new_err(e));
+                            }
+                            failed.push(remote_entry_str);
                         }
                     }
-                    files_copied += 1;
                 }
             }
         }
 
-        Ok((files_copied, bytes_transferred))
+        Ok((transferred, failed))
     }
 
 
@@ -1029,8 +1121,9 @@ impl AsyncConnection {
     }
 
     /// Uploads a local directory recursively to a remote path over SFTP.
-    /// Returns a tuple of (files_copied, bytes_transferred).
-    #[pyo3(signature = (local_path, remote_path, follow_symlinks=true, preserve_permissions=true))]
+    /// Returns a tuple of (transferred_files, failed_files).
+    /// If `fail_fast` is true, the first transfer error raises an exception immediately.
+    #[pyo3(signature = (local_path, remote_path, follow_symlinks=true, preserve_permissions=true, fail_fast=false))]
     fn sftp_put_dir<'p>(
         &self,
         py: Python<'p>,
@@ -1038,17 +1131,25 @@ impl AsyncConnection {
         remote_path: String,
         follow_symlinks: bool,
         preserve_permissions: bool,
+        fail_fast: bool,
     ) -> PyResult<Bound<'p, PyAny>> {
         let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            conn.sftp_put_dir_async(local_path, remote_path, follow_symlinks, preserve_permissions)
-                .await
+            conn.sftp_put_dir_async(
+                local_path,
+                remote_path,
+                follow_symlinks,
+                preserve_permissions,
+                fail_fast,
+            )
+            .await
         })
     }
 
     /// Downloads a remote directory recursively to a local path over SFTP.
-    /// Returns a tuple of (files_copied, bytes_transferred).
-    #[pyo3(signature = (remote_path, local_path, follow_symlinks=true, preserve_permissions=true))]
+    /// Returns a tuple of (transferred_files, failed_files).
+    /// If `fail_fast` is true, the first transfer error raises an exception immediately.
+    #[pyo3(signature = (remote_path, local_path, follow_symlinks=true, preserve_permissions=true, fail_fast=false))]
     fn sftp_get_dir<'p>(
         &self,
         py: Python<'p>,
@@ -1056,11 +1157,18 @@ impl AsyncConnection {
         local_path: String,
         follow_symlinks: bool,
         preserve_permissions: bool,
+        fail_fast: bool,
     ) -> PyResult<Bound<'p, PyAny>> {
         let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            conn.sftp_get_dir_async(remote_path, local_path, follow_symlinks, preserve_permissions)
-                .await
+            conn.sftp_get_dir_async(
+                remote_path,
+                local_path,
+                follow_symlinks,
+                preserve_permissions,
+                fail_fast,
+            )
+            .await
         })
     }
 

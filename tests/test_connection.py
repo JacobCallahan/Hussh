@@ -224,15 +224,17 @@ def test_sftp_put_dir(conn, tmp_path):
     (sub / "nested.txt").write_text("nested content")
 
     # Upload to remote
-    files_copied, bytes_transferred = conn.sftp_put_dir(str(src), "/root/test_put_dir")
+    transferred, failed = conn.sftp_put_dir(str(src), "/root/test_put_dir")
 
     # Verify files exist on remote
     remote_ls = conn.execute("find /root/test_put_dir -type f | sort").stdout
     assert "file1.txt" in remote_ls
     assert "file2.txt" in remote_ls
     assert "nested.txt" in remote_ls
-    assert files_copied == 3
-    assert bytes_transferred > 0
+    assert len(transferred) == 3
+    assert len(failed) == 0
+    # Transferred list contains local paths
+    assert any("file1.txt" in p for p in transferred)
 
     # Verify nested file contents
     content = conn.sftp_read("/root/test_put_dir/subdir/nested.txt")
@@ -252,17 +254,41 @@ def test_sftp_get_dir(conn, tmp_path):
 
     # Download to local
     dest = tmp_path / "dest_dir"
-    files_copied, bytes_transferred = conn.sftp_get_dir("/root/test_get_dir", str(dest))
+    transferred, failed = conn.sftp_get_dir("/root/test_get_dir", str(dest))
 
     # Verify local files
     assert (dest / "file1.txt").read_text() == "remote file 1"
     assert (dest / "file2.txt").read_text() == "remote file 2"
     assert (dest / "subdir" / "nested.txt").read_text() == "nested remote"
-    assert files_copied == 3
-    assert bytes_transferred > 0
+    assert len(transferred) == 3
+    assert len(failed) == 0
+    # Transferred list contains remote paths
+    assert any("file1.txt" in p for p in transferred)
 
     # Cleanup
     conn.execute("rm -rf /root/test_get_dir")
+
+
+def test_sftp_put_dir_fail_fast(conn, tmp_path):
+    """Test that sftp_put_dir with fail_fast=True raises on error."""
+    import pytest
+
+    src = tmp_path / "src_fail"
+    src.mkdir()
+    (src / "ok.txt").write_text("ok")
+
+    # Try to upload to a path whose parent doesn't exist (invalid path)
+    with pytest.raises(OSError):
+        conn.sftp_put_dir(str(src), "/nonexistent_parent/deep/path", fail_fast=True)
+
+
+def test_sftp_get_dir_fail_fast(conn, tmp_path):
+    """Test that sftp_get_dir with fail_fast=True raises on error."""
+    import pytest
+
+    dest = tmp_path / "dest_fail"
+    with pytest.raises(OSError):
+        conn.sftp_get_dir("/path/does/not/exist", str(dest), fail_fast=True)
 
 
 @pytest.mark.skip("non-text files are not supported by sftp")
