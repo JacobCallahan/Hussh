@@ -731,9 +731,18 @@ impl AsyncConnection {
                     if preserve_permissions {
                         use std::os::unix::fs::PermissionsExt;
                         let mode = metadata.permissions().mode();
+                        // Use explicit None for all fields except permissions.
+                        // FileAttributes::default() sets size: Some(0) which would
+                        // truncate the target via SSH_FXP_SETSTAT.
                         let attrs = russh_sftp::client::fs::Metadata {
+                            size: None,
+                            uid: None,
+                            user: None,
+                            gid: None,
+                            group: None,
                             permissions: Some(mode),
-                            ..Default::default()
+                            atime: None,
+                            mtime: None,
                         };
                         let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
                     }
@@ -779,9 +788,18 @@ impl AsyncConnection {
                         if preserve_permissions {
                             use std::os::unix::fs::PermissionsExt;
                             let mode = metadata.permissions().mode();
+                            // Use explicit None for all fields except permissions.
+                            // FileAttributes::default() sets size: Some(0) which would
+                            // truncate the file via SSH_FXP_SETSTAT.
                             let attrs = russh_sftp::client::fs::Metadata {
+                                size: None,
+                                uid: None,
+                                user: None,
+                                gid: None,
+                                group: None,
                                 permissions: Some(mode),
-                                ..Default::default()
+                                atime: None,
+                                mtime: None,
                             };
                             let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
                         }
