@@ -575,9 +575,14 @@ impl AsyncConnection {
             })?
         }
         remote_file
-            .shutdown()
+            .flush()
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to flush remote file: {}", e)))?;
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to close remote file: {}", e)))?;
+        std::mem::forget(remote_file);
         Ok(())
     }
 
@@ -602,9 +607,14 @@ impl AsyncConnection {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to write remote file: {}", e)))?;
 
         remote_file
-            .shutdown()
+            .flush()
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to flush remote file: {}", e)))?;
+        remote_file
+            .shutdown()
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to close remote file: {}", e)))?;
+        std::mem::forget(remote_file);
 
         Ok(())
     }
@@ -751,10 +761,20 @@ impl AsyncConnection {
                                 .await
                                 .map_err(|e| format!("Remote write error: {}", e))?;
                         }
+                        // Flush any buffered data then close the SFTP file handle.
+                        // After shutdown() has sent SSH_FXP_CLOSE and received the
+                        // status response, use mem::forget to prevent the Drop impl
+                        // from sending a redundant close that could corrupt the shared
+                        // SFTP session state for subsequent operations.
+                        remote_file
+                            .flush()
+                            .await
+                            .map_err(|e| format!("Remote file flush error: {}", e))?;
                         remote_file
                             .shutdown()
                             .await
-                            .map_err(|e| format!("Remote file flush error: {}", e))?;
+                            .map_err(|e| format!("Remote file close error: {}", e))?;
+                        std::mem::forget(remote_file);
                         #[cfg(unix)]
                         if preserve_permissions {
                             use std::os::unix::fs::PermissionsExt;
