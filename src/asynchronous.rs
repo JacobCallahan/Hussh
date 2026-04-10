@@ -582,7 +582,6 @@ impl AsyncConnection {
             .shutdown()
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to close remote file: {}", e)))?;
-        std::mem::forget(remote_file);
         Ok(())
     }
 
@@ -614,7 +613,6 @@ impl AsyncConnection {
             .shutdown()
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to close remote file: {}", e)))?;
-        std::mem::forget(remote_file);
 
         Ok(())
     }
@@ -635,26 +633,37 @@ impl AsyncConnection {
         let mut transferred: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
-        // Ensure remote base directory exists
-        if !sftp.try_exists(&remote_path).await.unwrap_or(false) {
-            match sftp.create_dir(&remote_path).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let msg = format!("Failed to create remote directory '{}': {}", remote_path, e);
-                    if fail_fast {
-                        return Err(PyRuntimeError::new_err(msg));
+        // Ensure remote base directory (and all missing parents) exist — like mkdir -p
+        {
+            let parts: Vec<&str> = remote_path.split('/').filter(|s| !s.is_empty()).collect();
+            let is_absolute = remote_path.starts_with('/');
+            let mut current = if is_absolute {
+                String::from("/")
+            } else {
+                String::new()
+            };
+            for part in &parts {
+                if !current.is_empty() && !current.ends_with('/') {
+                    current.push('/');
+                }
+                current.push_str(part);
+                if !sftp.try_exists(&current).await.unwrap_or(false) {
+                    if let Err(e) = sftp.create_dir(&current).await {
+                        let msg = format!("Failed to create remote directory '{}': {}", current, e);
+                        if fail_fast {
+                            return Err(PyRuntimeError::new_err(msg));
+                        }
+                        failed.push(local_path.clone());
+                        return Ok((transferred, failed));
                     }
-                    failed.push(remote_path);
-                    return Ok((transferred, failed));
                 }
             }
         }
 
-        // Stack for depth-first traversal: (local_dir, remote_dir)
-        let mut dirs_to_process: Vec<(std::path::PathBuf, std::path::PathBuf)> = vec![(
-            std::path::PathBuf::from(&local_path),
-            std::path::PathBuf::from(&remote_path),
-        )];
+        // Stack for depth-first traversal: (local_dir, remote_dir_str).
+        // Remote paths are kept as POSIX strings to avoid OS-native path separators on Windows.
+        let mut dirs_to_process: Vec<(std::path::PathBuf, String)> =
+            vec![(std::path::PathBuf::from(&local_path), remote_path.clone())];
 
         while let Some((local_dir, remote_dir)) = dirs_to_process.pop() {
             let mut read_dir = match tokio::fs::read_dir(&local_dir).await {
@@ -690,8 +699,8 @@ impl AsyncConnection {
 
                 let local_entry = entry.path();
                 let local_entry_str = local_entry.to_string_lossy().to_string();
-                let remote_entry = remote_dir.join(entry.file_name());
-                let remote_entry_str = remote_entry.to_string_lossy().to_string();
+                let file_name_str = entry.file_name().to_string_lossy().to_string();
+                let remote_entry_str = format!("{}/{}", remote_dir, file_name_str);
 
                 let metadata = match if follow_symlinks {
                     tokio::fs::metadata(&local_entry).await
@@ -746,7 +755,7 @@ impl AsyncConnection {
                         };
                         let _ = sftp.set_metadata(&remote_entry_str, attrs).await;
                     }
-                    dirs_to_process.push((local_entry, remote_entry));
+                    dirs_to_process.push((local_entry, remote_entry_str));
                 } else if metadata.is_file() {
                     let transfer_result: Result<(), String> = async {
                         let mut local_file = tokio::fs::File::open(&local_entry)
@@ -771,10 +780,7 @@ impl AsyncConnection {
                                 .map_err(|e| format!("Remote write error: {}", e))?;
                         }
                         // Flush any buffered data then close the SFTP file handle.
-                        // After shutdown() has sent SSH_FXP_CLOSE and received the
-                        // status response, use mem::forget to prevent the Drop impl
-                        // from sending a redundant close that could corrupt the shared
-                        // SFTP session state for subsequent operations.
+                        // shutdown() sets closed=true so Drop won't send a redundant close.
                         remote_file
                             .flush()
                             .await
@@ -783,7 +789,6 @@ impl AsyncConnection {
                             .shutdown()
                             .await
                             .map_err(|e| format!("Remote file close error: {}", e))?;
-                        std::mem::forget(remote_file);
                         #[cfg(unix)]
                         if preserve_permissions {
                             use std::os::unix::fs::PermissionsExt;
@@ -852,14 +857,13 @@ impl AsyncConnection {
             }
         }
 
-        // Stack for depth-first traversal: (remote_dir, local_dir)
-        let mut dirs_to_process: Vec<(std::path::PathBuf, std::path::PathBuf)> = vec![(
-            std::path::PathBuf::from(&remote_path),
-            std::path::PathBuf::from(&local_path),
-        )];
+        // Stack for depth-first traversal: (remote_dir_str, local_dir).
+        // Remote paths are kept as POSIX strings to avoid OS-native path separators on Windows.
+        let mut dirs_to_process: Vec<(String, std::path::PathBuf)> =
+            vec![(remote_path.clone(), std::path::PathBuf::from(&local_path))];
 
         while let Some((remote_dir, local_dir)) = dirs_to_process.pop() {
-            let remote_dir_str = remote_dir.to_string_lossy().to_string();
+            let remote_dir_str = remote_dir.clone();
             let read_dir = match sftp.read_dir(&remote_dir_str).await {
                 Ok(d) => d,
                 Err(e) => {
@@ -877,9 +881,9 @@ impl AsyncConnection {
 
             for entry in read_dir {
                 let file_name = entry.file_name();
+                // Build remote path with POSIX separator to stay cross-platform.
+                let remote_entry_str = format!("{}/{}", remote_dir, file_name);
                 let local_entry = local_dir.join(&file_name);
-                let remote_entry = remote_dir.join(&file_name);
-                let remote_entry_str = remote_entry.to_string_lossy().to_string();
 
                 // When follow_symlinks=true, resolve symlinks on remote via metadata()
                 let file_type = if follow_symlinks && entry.file_type().is_symlink() {
@@ -925,7 +929,7 @@ impl AsyncConnection {
                             .await;
                         }
                     }
-                    dirs_to_process.push((remote_entry, local_entry));
+                    dirs_to_process.push((remote_entry_str, local_entry));
                 } else if file_type.is_file() {
                     let transfer_result: Result<(), String> = async {
                         let mut remote_file = sftp

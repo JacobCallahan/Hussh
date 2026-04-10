@@ -277,9 +277,16 @@ def test_sftp_put_dir_fail_fast(conn, tmp_path):
     src.mkdir()
     (src / "ok.txt").write_text("ok")
 
-    # Try to upload to a path whose parent doesn't exist (invalid path)
-    with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
-        conn.sftp_put_dir(str(src), "/nonexistent_parent/deep/path", fail_fast=True)
+    # Pre-create a *file* at the target path so that attempting to create a
+    # sub-directory inside it fails, even after mkdir-p creates its parents.
+    conn.sftp_write_data("blocking", "/root/put_dir_fail_target")
+    try:
+        with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
+            conn.sftp_put_dir(
+                str(src), "/root/put_dir_fail_target/deep", fail_fast=True
+            )
+    finally:
+        conn.execute("rm -f /root/put_dir_fail_target")
 
 
 def test_sftp_get_dir_fail_fast(conn, tmp_path):
