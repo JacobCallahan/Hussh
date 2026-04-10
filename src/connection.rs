@@ -596,26 +596,37 @@ impl Connection {
         let mut transferred: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
-        // Ensure remote base directory exists
-        if self.sftp().stat(Path::new(&remote_path)).is_err() {
-            match self.sftp().mkdir(Path::new(&remote_path), 0o755) {
-                Ok(_) => {}
-                Err(e) => {
-                    let msg = format!("Failed to create remote directory '{}': {}", remote_path, e);
-                    if fail_fast {
-                        return Err(PyErr::new::<PyIOError, _>(msg));
+        // Ensure remote base directory (and all missing parents) exist — like mkdir -p
+        {
+            let parts: Vec<&str> = remote_path.split('/').filter(|s| !s.is_empty()).collect();
+            let is_absolute = remote_path.starts_with('/');
+            let mut current = if is_absolute {
+                String::from("/")
+            } else {
+                String::new()
+            };
+            for part in &parts {
+                if !current.is_empty() && !current.ends_with('/') {
+                    current.push('/');
+                }
+                current.push_str(part);
+                if self.sftp().stat(Path::new(&current)).is_err() {
+                    if let Err(e) = self.sftp().mkdir(Path::new(&current), 0o755) {
+                        let msg = format!("Failed to create remote directory '{}': {}", current, e);
+                        if fail_fast {
+                            return Err(PyErr::new::<PyIOError, _>(msg));
+                        }
+                        failed.push(local_path.clone());
+                        return Ok((transferred, failed));
                     }
-                    failed.push(remote_path);
-                    return Ok((transferred, failed));
                 }
             }
         }
 
-        // Stack for depth-first traversal: (local_dir, remote_dir)
-        let mut dirs_to_process: Vec<(std::path::PathBuf, std::path::PathBuf)> = vec![(
-            std::path::PathBuf::from(&local_path),
-            std::path::PathBuf::from(&remote_path),
-        )];
+        // Stack for depth-first traversal: (local_dir, remote_dir_str).
+        // Remote paths are kept as POSIX strings to avoid OS-native path separators on Windows.
+        let mut dirs_to_process: Vec<(std::path::PathBuf, String)> =
+            vec![(std::path::PathBuf::from(&local_path), remote_path.clone())];
 
         while let Some((local_dir, remote_dir)) = dirs_to_process.pop() {
             let entries = match std::fs::read_dir(&local_dir) {
@@ -650,8 +661,8 @@ impl Connection {
 
                 let local_entry = entry.path();
                 let local_entry_str = local_entry.to_string_lossy().to_string();
-                let remote_entry = remote_dir.join(entry.file_name());
-                let remote_entry_str = remote_entry.to_string_lossy().to_string();
+                let file_name_str = entry.file_name().to_string_lossy().to_string();
+                let remote_entry_str = format!("{}/{}", remote_dir, file_name_str);
 
                 let metadata = match if follow_symlinks {
                     std::fs::metadata(&local_entry)
@@ -696,7 +707,7 @@ impl Connection {
                             }
                         }
                     }
-                    dirs_to_process.push((local_entry, remote_entry));
+                    dirs_to_process.push((local_entry, remote_entry_str));
                 } else if metadata.is_file() {
                     let result: Result<(), String> = (|| {
                         let mut local_file = std::fs::File::open(&local_entry)
@@ -788,14 +799,13 @@ impl Connection {
             return Ok((transferred, failed));
         }
 
-        // Stack for depth-first traversal: (remote_dir, local_dir)
-        let mut dirs_to_process: Vec<(std::path::PathBuf, std::path::PathBuf)> = vec![(
-            std::path::PathBuf::from(&remote_path),
-            std::path::PathBuf::from(&local_path),
-        )];
+        // Stack for depth-first traversal: (remote_dir_str, local_dir).
+        // Remote paths are kept as POSIX strings to avoid OS-native path separators on Windows.
+        let mut dirs_to_process: Vec<(String, std::path::PathBuf)> =
+            vec![(remote_path.clone(), std::path::PathBuf::from(&local_path))];
 
         while let Some((remote_dir, local_dir)) = dirs_to_process.pop() {
-            let remote_dir_str = remote_dir.to_string_lossy().to_string();
+            let remote_dir_str = remote_dir.clone();
             let entries = match self.sftp().readdir(Path::new(&remote_dir_str)) {
                 Ok(e) => e,
                 Err(e) => {
@@ -821,9 +831,10 @@ impl Connection {
                         continue;
                     }
                 };
+                let file_name_str = file_name.to_string_lossy();
                 let local_entry = local_dir.join(&file_name);
-                let remote_entry = remote_dir.join(&entry_name);
-                let remote_entry_str = remote_entry.to_string_lossy().to_string();
+                // Build remote path with POSIX separator to stay cross-platform.
+                let remote_entry_str = format!("{}/{}", remote_dir, file_name_str);
 
                 // When follow_symlinks=true, resolve symlinks on remote via stat()
                 let resolved_stat = if follow_symlinks && stat.file_type().is_symlink() {
@@ -862,7 +873,7 @@ impl Connection {
                             );
                         }
                     }
-                    dirs_to_process.push((remote_entry, local_entry));
+                    dirs_to_process.push((remote_entry_str, local_entry));
                 } else if resolved_stat.is_file() {
                     let result: Result<(), String> = (|| {
                         let mut remote_file = BufReader::new(
