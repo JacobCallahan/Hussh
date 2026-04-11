@@ -282,9 +282,7 @@ def test_sftp_put_dir_fail_fast(conn, tmp_path):
     conn.sftp_write_data("blocking", "/root/put_dir_fail_target")
     try:
         with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
-            conn.sftp_put_dir(
-                str(src), "/root/put_dir_fail_target/deep", fail_fast=True
-            )
+            conn.sftp_put_dir(str(src), "/root/put_dir_fail_target/deep", fail_fast=True)
     finally:
         conn.execute("rm -f /root/put_dir_fail_target")
 
