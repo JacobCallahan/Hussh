@@ -47,6 +47,21 @@ async with AsyncConnection(
 ```
 
 ### SSH Agent Authentication
+
+### Jump Hosts and Proxy Commands
+```python
+jump = AsyncConnection("bastion.example.com", username="user", key_path="~/.ssh/id_rsa")
+async with AsyncConnection("target.internal", username="user", proxy_jump=jump) as conn:
+    await conn.execute("hostname")
+
+async with AsyncConnection(
+    "target.internal",
+    username="user",
+    proxy_command="ssh -W %h:%p bastion.example.com",
+) as conn:
+    await conn.execute("hostname")
+```
+
 ```python
 async with AsyncConnection("my.test.server") as conn:
     result = await conn.execute("whoami")

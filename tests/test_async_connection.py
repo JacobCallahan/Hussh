@@ -28,6 +28,48 @@ async def test_async_connection_manual(run_test_server):
 
 
 @pytest.mark.asyncio
+async def test_async_proxy_command(run_test_server):
+    """Test async connection through a local ProxyCommand transport."""
+    if shutil.which("ssh") is None:
+        pytest.skip("OpenSSH client is required for proxy tests")
+    key_path = Path("tests/data/test_key").resolve()
+    key_path.chmod(0o600)
+    proxy_command = (
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        f"-i {key_path} -p 8022 root@localhost -W %h:%p"
+    )
+    async with AsyncConnection(
+        "localhost",
+        username="root",
+        password="husshtest",
+        port=8022,
+        proxy_command=proxy_command,
+    ) as conn:
+        result = await conn.execute("echo async proxy command")
+        assert result.status == 0
+        assert "async proxy command" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_async_proxy_jump(run_test_server, run_second_server):
+    """Test async connection to a second server through a jump host."""
+    if shutil.which("ssh") is None:
+        pytest.skip("OpenSSH client is required for proxy tests")
+    key_path = Path("tests/data/test_key").resolve()
+    key_path.chmod(0o600)
+    jump = AsyncConnection("localhost", username="root", key_path=str(key_path), port=8022)
+    async with AsyncConnection(
+        "localhost",
+        username="root",
+        password="husshtest",
+        port=8023,
+        proxy_jump=jump,
+    ) as conn:
+        result = await conn.execute("echo async via jump host")
+        assert result.status == 0
+        assert "async via jump host" in result.stdout
+
+@pytest.mark.asyncio
 async def test_async_sftp(run_test_server, tmp_path):
     async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:
         # Test sftp_write (upload a file)
