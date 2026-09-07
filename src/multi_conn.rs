@@ -324,6 +324,7 @@ impl MultiConnection {
                 } else {
                     Some(conn.get_private_key().to_string())
                 },
+                None,
                 port,
                 0,                    // keepalive_interval
                 timeout.unwrap_or(0), // Use explicit timeout or 0 for no timeout
@@ -362,6 +363,7 @@ impl MultiConnection {
                     username.clone(),
                     password.clone(),
                     key_path.clone(),
+                    None,
                     port,
                     0, // keepalive_interval
                     timeout,

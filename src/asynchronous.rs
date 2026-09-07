@@ -99,14 +99,16 @@
 //! ```
 
 use crate::connection::{SSHResult, MAX_BUFF_SIZE};
-use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyTypeError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 
 /// Create a PrivateKeyWithHashAlg with the appropriate hash algorithm for the key type.
@@ -155,6 +157,135 @@ async fn try_default_keys(
         }
     }
     Ok(false) // No default keys worked
+}
+
+#[derive(Clone)]
+struct AsyncProxyJumpConfig {
+    host: String,
+    port: u16,
+    username: Option<String>,
+    key_path: Option<String>,
+}
+
+fn parse_async_host_port(value: &str) -> PyResult<(String, u16)> {
+    if let Some((host, port_str)) = value.rsplit_once(':') {
+        let port = port_str.parse::<u16>().map_err(|_| {
+            PyErr::new::<PyTypeError, _>("proxy_jump string port must be a valid integer")
+        })?;
+        return Ok((host.to_string(), port));
+    }
+    Ok((value.to_string(), 22))
+}
+
+fn parse_async_proxy_jump(value: &Bound<'_, PyAny>) -> PyResult<AsyncProxyJumpConfig> {
+    if let Ok(conn) = value.extract::<PyRef<'_, AsyncConnection>>() {
+        return Ok(AsyncProxyJumpConfig {
+            host: conn.host.clone(),
+            port: conn.port,
+            username: conn.username.clone(),
+            key_path: conn.key_path.clone(),
+        });
+    }
+
+    if let Ok((host, port)) = value.extract::<(String, u16)>() {
+        return Ok(AsyncProxyJumpConfig {
+            host,
+            port,
+            username: None,
+            key_path: None,
+        });
+    }
+
+    if let Ok(spec) = value.extract::<String>() {
+        if let Some((username, host_port)) = spec.split_once('@') {
+            let (host, port) = parse_async_host_port(host_port)?;
+            return Ok(AsyncProxyJumpConfig {
+                host,
+                port,
+                username: Some(username.to_string()),
+                key_path: None,
+            });
+        }
+        let (host, port) = parse_async_host_port(&spec)?;
+        return Ok(AsyncProxyJumpConfig {
+            host,
+            port,
+            username: None,
+            key_path: None,
+        });
+    }
+
+    Err(PyErr::new::<PyTypeError, _>(
+        "proxy_jump must be an AsyncConnection, (host, port) tuple, or string",
+    ))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn build_async_proxy_jump_command(
+    target_host: &str,
+    target_port: u16,
+    jump: &AsyncProxyJumpConfig,
+) -> String {
+    let username = jump.username.as_deref().unwrap_or("root");
+    let mut command = format!(
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -l {} -p {}",
+        shell_quote(username),
+        jump.port
+    );
+    if let Some(key_path) = jump.key_path.as_deref() {
+        let expanded_key = shellexpand::tilde(key_path).into_owned();
+        command.push_str(&format!(" -i {}", shell_quote(&expanded_key)));
+    }
+    command.push_str(&format!(
+        " -W {}:{} {}",
+        shell_quote(target_host),
+        target_port,
+        shell_quote(&jump.host)
+    ));
+    command
+}
+
+fn render_proxy_command(command: &str, host: &str, port: u16) -> String {
+    command.replace("%h", host).replace("%p", &port.to_string())
+}
+
+#[cfg(unix)]
+fn create_async_proxy_stream(
+    command: &str,
+) -> PyResult<(tokio::net::UnixStream, tokio::process::Child)> {
+    let (client_std, proxy_std) = std::os::unix::net::UnixStream::pair()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create proxy transport: {}", e)))?;
+    client_std.set_nonblocking(true).map_err(|e| {
+        PyRuntimeError::new_err(format!("Failed to configure proxy transport: {}", e))
+    })?;
+    let client_stream = tokio::net::UnixStream::from_std(client_std)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to attach proxy transport: {}", e)))?;
+
+    let stdin_side = proxy_std
+        .try_clone()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to clone proxy stream: {}", e)))?;
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::from(stdin_side))
+        .stdout(Stdio::from(proxy_std))
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to start proxy command: {}", e)))?;
+
+    Ok((client_stream, child))
+}
+
+#[cfg(not(unix))]
+fn create_async_proxy_stream(
+    _command: &str,
+) -> PyResult<(tokio::net::TcpStream, tokio::process::Child)> {
+    Err(PyRuntimeError::new_err(
+        "proxy_command and proxy_jump are currently only supported on Unix platforms",
+    ))
 }
 
 #[derive(Clone)]
@@ -283,6 +414,19 @@ pub struct AsyncConnection {
     sftp_session: Arc<Mutex<Option<Arc<SftpSession>>>>,
     config: Arc<Config>,
     timeout: u64,
+    proxy_command: Option<String>,
+    proxy_process: Arc<Mutex<Option<Child>>>,
+}
+
+impl Drop for AsyncConnection {
+    fn drop(&mut self) {
+        if let Ok(mut proxy_guard) = self.proxy_process.try_lock() {
+            if let Some(child) = proxy_guard.as_mut() {
+                let _ = child.start_kill();
+            }
+            *proxy_guard = None;
+        }
+    }
 }
 
 // Private/internal async helper methods for AsyncConnection
@@ -351,13 +495,27 @@ impl AsyncConnection {
         let password = self.password.clone();
         let key_path = self.key_path.clone();
         let session_arc = self.session.clone();
+        let proxy_command = self.proxy_command.clone();
+        let proxy_process_arc = self.proxy_process.clone();
         let timeout = timeout.unwrap_or(self.timeout);
 
         let run = async {
             let handler = ClientHandler {};
-            let mut session = russh::client::connect(config, (host.as_str(), port), handler)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?;
+            let mut session = if let Some(command) = proxy_command.as_deref() {
+                let rendered = render_proxy_command(command, &host, port);
+                let (proxy_stream, child) = create_async_proxy_stream(&rendered)?;
+                {
+                    let mut proxy_guard = proxy_process_arc.lock().await;
+                    *proxy_guard = Some(child);
+                }
+                russh::client::connect_stream(config, proxy_stream, handler)
+                    .await
+                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?
+            } else {
+                russh::client::connect(config, (host.as_str(), port), handler)
+                    .await
+                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?
+            };
 
             // Authentication
             let auth_res = if let Some(key_p) = key_path.clone() {
@@ -495,6 +653,12 @@ impl AsyncConnection {
         *sftp_guard = None;
         let mut guard = self.session.lock().await;
         *guard = None;
+        let mut proxy_guard = self.proxy_process.lock().await;
+        if let Some(child) = proxy_guard.as_mut() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        *proxy_guard = None;
     }
 
     /// Internal async SFTP read implementation - used by MultiConnection
@@ -997,6 +1161,7 @@ impl AsyncConnection {
         username: Option<String>,
         password: Option<String>,
         key_path: Option<String>,
+        proxy_command: Option<String>,
         port: u16,
         keepalive_interval: u64,
         timeout: u64,
@@ -1016,6 +1181,8 @@ impl AsyncConnection {
             sftp_session: Arc::new(Mutex::new(None)),
             config: Arc::new(config),
             timeout,
+            proxy_command,
+            proxy_process: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1037,25 +1204,45 @@ impl AsyncConnection {
 #[pymethods]
 impl AsyncConnection {
     #[new]
-    #[pyo3(signature = (host, username=None, password=None, key_path=None, port=22, keepalive_interval=0, timeout=0))]
+    #[pyo3(signature = (host, username=None, password=None, key_path=None, proxy_jump=None, proxy_command=None, port=22, keepalive_interval=0, timeout=0))]
     pub fn new(
+        _py: Python<'_>,
         host: String,
         username: Option<String>,
         password: Option<String>,
         key_path: Option<String>,
+        proxy_jump: Option<Bound<'_, PyAny>>,
+        proxy_command: Option<String>,
         port: u16,
         keepalive_interval: u64,
         timeout: u64,
-    ) -> Self {
-        Self::create(
+    ) -> PyResult<Self> {
+        let proxy_jump = match proxy_jump {
+            Some(value) => Some(parse_async_proxy_jump(&value)?),
+            None => None,
+        };
+        if proxy_jump.is_some() && proxy_command.is_some() {
+            return Err(PyErr::new::<PyTypeError, _>(
+                "proxy_jump and proxy_command are mutually exclusive",
+            ));
+        }
+
+        let resolved_proxy_command = if let Some(jump_cfg) = proxy_jump.as_ref() {
+            Some(build_async_proxy_jump_command(&host, port, jump_cfg))
+        } else {
+            proxy_command
+        };
+
+        Ok(Self::create(
             host,
             username,
             password,
             key_path,
+            resolved_proxy_command,
             port,
             keepalive_interval,
             timeout,
-        )
+        ))
     }
 
     #[pyo3(signature = (timeout=None))]

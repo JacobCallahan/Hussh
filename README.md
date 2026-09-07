@@ -70,6 +70,17 @@ conn = Connection(host="my.test.server", username="user", password="pass")
 
 # Key-based authentication
 conn = Connection(host="my.test.server", private_key="~/.ssh/id_rsa")
+
+# Connect through a jump host (ProxyJump)
+jump = Connection(host="bastion.example.com", username="user", private_key="~/.ssh/id_rsa")
+conn = Connection("target.internal", username="user", proxy_jump=jump)
+
+# Connect through a proxy command (ProxyCommand)
+conn = Connection(
+    "target.internal",
+    username="user",
+    proxy_command="ssh -W %h:%p bastion.example.com",
+)
 ```
 
 ## Executing Commands
@@ -107,6 +118,17 @@ async def main():
     async with AsyncConnection(host="my.test.server", username="user", password="pass") as conn:
         result = await conn.execute("ls")
     print(result.stdout)
+
+    jump = AsyncConnection("bastion.example.com", username="user", key_path="~/.ssh/id_rsa")
+    async with AsyncConnection("target.internal", username="user", proxy_jump=jump) as target:
+        await target.execute("hostname")
+
+    async with AsyncConnection(
+        "target.internal",
+        username="user",
+        proxy_command="ssh -W %h:%p bastion.example.com",
+    ) as proxied:
+        await proxied.execute("hostname")
 
 asyncio.run(main())
 ```

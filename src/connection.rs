@@ -65,7 +65,10 @@ use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::net::TcpStream;
 use std::path::Path;
 
-use pyo3::exceptions::{PyIOError, PyTimeoutError};
+use pyo3::exceptions::{PyIOError, PyTimeoutError, PyTypeError};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+use std::process::{Child, Command, Stdio};
 
 pub(crate) const MAX_BUFF_SIZE: usize = 65536;
 create_exception!(
@@ -95,6 +98,130 @@ fn read_from_channel(channel: &mut Channel) -> Result<SSHResult, PyErr> {
         stderr,
         status,
     })
+}
+
+#[derive(Clone)]
+struct ProxyJumpConfig {
+    host: String,
+    port: i32,
+    username: Option<String>,
+    private_key: Option<String>,
+}
+
+fn parse_proxy_jump(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<ProxyJumpConfig> {
+    if let Ok(conn) = value.extract::<PyRef<'_, Connection>>() {
+        return Ok(ProxyJumpConfig {
+            host: conn.get_host().to_string(),
+            port: conn.get_port(),
+            username: Some(conn.get_username().to_string()),
+            private_key: if conn.get_private_key().is_empty() {
+                None
+            } else {
+                Some(conn.get_private_key().to_string())
+            },
+        });
+    }
+
+    if let Ok((host, port)) = value.extract::<(String, i32)>() {
+        return Ok(ProxyJumpConfig {
+            host,
+            port,
+            username: None,
+            private_key: None,
+        });
+    }
+
+    if let Ok(spec) = value.extract::<String>() {
+        if let Some((username, host_port)) = spec.split_once('@') {
+            let (host, port) = parse_host_port(host_port)?;
+            return Ok(ProxyJumpConfig {
+                host,
+                port,
+                username: Some(username.to_string()),
+                private_key: None,
+            });
+        }
+
+        let (host, port) = parse_host_port(&spec)?;
+        return Ok(ProxyJumpConfig {
+            host,
+            port,
+            username: None,
+            private_key: None,
+        });
+    }
+
+    Err(PyErr::new::<PyTypeError, _>(
+        "proxy_jump must be a Connection, (host, port) tuple, or string",
+    ))
+}
+
+fn parse_host_port(value: &str) -> PyResult<(String, i32)> {
+    if let Some((host, port_str)) = value.rsplit_once(':') {
+        let port = port_str.parse::<i32>().map_err(|_| {
+            PyErr::new::<PyTypeError, _>("proxy_jump string port must be a valid integer")
+        })?;
+        return Ok((host.to_string(), port));
+    }
+    Ok((value.to_string(), 22))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn build_proxy_jump_command(target_host: &str, target_port: i32, jump: &ProxyJumpConfig) -> String {
+    let username = jump.username.as_deref().unwrap_or("root");
+    let mut command = format!(
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -l {} -p {}",
+        shell_quote(username),
+        jump.port
+    );
+
+    if let Some(private_key) = jump.private_key.as_deref() {
+        let expanded_key = shellexpand::tilde(private_key).into_owned();
+        command.push_str(&format!(" -i {}", shell_quote(&expanded_key)));
+    }
+
+    command.push_str(&format!(
+        " -W {}:{} {}",
+        shell_quote(target_host),
+        target_port,
+        shell_quote(&jump.host)
+    ));
+    command
+}
+
+fn render_proxy_command(command: &str, host: &str, port: i32) -> String {
+    command.replace("%h", host).replace("%p", &port.to_string())
+}
+
+#[cfg(unix)]
+fn create_proxy_stream(command: &str) -> PyResult<(UnixStream, Child)> {
+    let (stream, proxy_side) = UnixStream::pair().map_err(|e| {
+        PyErr::new::<PyTimeoutError, _>(format!("Failed to create proxy transport: {}", e))
+    })?;
+    let stdin_side = proxy_side.try_clone().map_err(|e| {
+        PyErr::new::<PyTimeoutError, _>(format!("Failed to clone proxy stream: {}", e))
+    })?;
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::from(stdin_side))
+        .stdout(Stdio::from(proxy_side))
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            PyErr::new::<PyTimeoutError, _>(format!("Failed to start proxy command: {}", e))
+        })?;
+    Ok((stream, child))
+}
+
+#[cfg(not(unix))]
+fn create_proxy_stream(_command: &str) -> PyResult<(TcpStream, Child)> {
+    Err(PyErr::new::<PyTimeoutError, _>(
+        "proxy_command and proxy_jump are currently only supported on Unix platforms",
+    ))
 }
 
 #[pyclass]
@@ -230,6 +357,9 @@ pub struct Connection {
     private_key: String,
     #[pyo3(get)]
     timeout: u32,
+    #[pyo3(get)]
+    proxy_command: Option<String>,
+    proxy_process: Option<Child>,
     sftp_conn: Option<ssh2::Sftp>,
 }
 
@@ -269,48 +399,78 @@ impl Connection {
     }
 }
 
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if let Some(child) = self.proxy_process.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.proxy_process = None;
+    }
+}
+
 #[pymethods]
 impl Connection {
     #[new]
-    #[pyo3(signature = (host, port=22, username="root", password=None, private_key=None, timeout=0))]
+    #[pyo3(signature = (host, port=22, username="root", password=None, private_key=None, proxy_jump=None, proxy_command=None, timeout=0))]
     fn new(
+        py: Python<'_>,
         host: &str,
         port: Option<i32>,
         username: Option<&str>,
         password: Option<&str>,
         private_key: Option<&str>,
+        proxy_jump: Option<Bound<'_, PyAny>>,
+        proxy_command: Option<&str>,
         timeout: Option<u32>,
     ) -> PyResult<Connection> {
-        // if port isn't set, use the default ssh port 22
         let port = port.unwrap_or(22);
-        // combine the host and port into a single string
-        let conn_str = format!("{}:{}", host, port);
-        let tcp_conn = TcpStream::connect(conn_str)
-            .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
+
+        let proxy_jump = match proxy_jump {
+            Some(value) => Some(parse_proxy_jump(py, &value)?),
+            None => None,
+        };
+        if proxy_jump.is_some() && proxy_command.is_some() {
+            return Err(PyErr::new::<PyTypeError, _>(
+                "proxy_jump and proxy_command are mutually exclusive",
+            ));
+        }
+        let effective_proxy_command = if let Some(jump_cfg) = proxy_jump.as_ref() {
+            Some(build_proxy_jump_command(host, port, jump_cfg))
+        } else {
+            proxy_command.map(ToString::to_string)
+        };
+
         let mut session = Session::new().unwrap();
-        // if a timeout is set, use it
+        let mut proxy_process = None;
         let timeout = timeout.unwrap_or(0);
         session.set_timeout(timeout);
-        session.set_tcp_stream(tcp_conn);
+        if let Some(command) = effective_proxy_command.as_deref() {
+            let rendered = render_proxy_command(command, host, port);
+            let (proxy_stream, child) = create_proxy_stream(&rendered)?;
+            proxy_process = Some(child);
+            session.set_tcp_stream(proxy_stream);
+        } else {
+            let conn_str = format!("{}:{}", host, port);
+            let tcp_conn = TcpStream::connect(conn_str)
+                .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
+            session.set_tcp_stream(tcp_conn);
+        }
+
         session
             .handshake()
             .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
-        // if username isn't set, try using root
         let username = username.unwrap_or("root");
         let password = password.unwrap_or("");
         let private_key = private_key.unwrap_or("");
-        // if private_key is set, use it to authenticate
+
         if !private_key.is_empty() {
-            // If a user uses a tilde to represent the home directory,
-            // replace it with the actual home directory
             let private_key = shellexpand::tilde(private_key).into_owned();
-            // if a password is set, use it to decrypt the private key
             if !password.is_empty() {
                 session
                     .userauth_pubkey_file(username, None, Path::new(&private_key), Some(password))
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
             } else {
-                // otherwise, try using the private key without a passphrase
                 session
                     .userauth_pubkey_file(username, None, Path::new(&private_key), None)
                     .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
@@ -319,43 +479,34 @@ impl Connection {
             session
                 .userauth_password(username, password)
                 .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
-        } else {
-            // if password isn't set, try using the default ssh-agent first
-            if session.userauth_agent(username).is_err() {
-                // if ssh-agent fails, try default SSH key files in common order of preference
-                // This mimics the behavior of standard SSH clients
-                let default_keys = [
-                    "~/.ssh/id_rsa",     // RSA keys (most common)
-                    "~/.ssh/id_ed25519", // Ed25519 keys (modern, secure)
-                    "~/.ssh/id_ecdsa",   // ECDSA keys
-                    "~/.ssh/id_dsa",     // DSA keys (legacy)
-                ];
+        } else if session.userauth_agent(username).is_err() {
+            let default_keys = [
+                "~/.ssh/id_rsa",
+                "~/.ssh/id_ed25519",
+                "~/.ssh/id_ecdsa",
+                "~/.ssh/id_dsa",
+            ];
 
-                let mut auth_success = false;
-                for key_path in &default_keys {
-                    let expanded_key_path = shellexpand::tilde(key_path).into_owned();
-                    if Path::new(&expanded_key_path).exists()
-                        && session
-                            .userauth_pubkey_file(
-                                username,
-                                None,
-                                Path::new(&expanded_key_path),
-                                None,
-                            )
-                            .is_ok()
-                    {
-                        auth_success = true;
-                        break;
-                    }
-                }
-
-                if !auth_success {
-                    return Err(PyErr::new::<AuthenticationError, _>(
-                        "Failed to authenticate with ssh-agent and default SSH keys",
-                    ));
+            let mut auth_success = false;
+            for key_path in &default_keys {
+                let expanded_key_path = shellexpand::tilde(key_path).into_owned();
+                if Path::new(&expanded_key_path).exists()
+                    && session
+                        .userauth_pubkey_file(username, None, Path::new(&expanded_key_path), None)
+                        .is_ok()
+                {
+                    auth_success = true;
+                    break;
                 }
             }
+
+            if !auth_success {
+                return Err(PyErr::new::<AuthenticationError, _>(
+                    "Failed to authenticate with ssh-agent and default SSH keys",
+                ));
+            }
         }
+
         Ok(Connection {
             session,
             port,
@@ -364,6 +515,8 @@ impl Connection {
             password: password.to_string(),
             private_key: private_key.to_string(),
             timeout,
+            proxy_command: effective_proxy_command,
+            proxy_process,
             sftp_conn: None,
         })
     }
@@ -974,10 +1127,13 @@ impl Connection {
     }
 
     /// Close the connection's session
-    fn close(&self) -> PyResult<()> {
-        self.session
-            .disconnect(None, "Bye from Hussh", None)
-            .unwrap();
+    fn close(&mut self) -> PyResult<()> {
+        let _ = self.session.disconnect(None, "Bye from Hussh", None);
+        if let Some(child) = self.proxy_process.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.proxy_process = None;
         Ok(())
     }
 
