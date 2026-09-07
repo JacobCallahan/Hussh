@@ -147,6 +147,55 @@ def test_conn_context():
     assert result.stdout == "hello\n"
 
 
+def test_proxy_command():
+    """Test connecting through a local ProxyCommand transport."""
+    if shutil.which("ssh") is None:
+        pytest.skip("OpenSSH client is required for proxy tests")
+    key_path = Path("tests/data/test_key").resolve()
+    key_path.chmod(0o600)
+    proxy_command = (
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+        f"-i {key_path} -p 8022 root@localhost -W %h:%p"
+    )
+    conn = Connection(
+        host="localhost",
+        port=8022,
+        username="root",
+        password="husshtest",
+        proxy_command=proxy_command,
+    )
+    result = conn.execute("echo proxy command")
+    assert result.status == 0
+    assert "proxy command" in result.stdout
+    conn.close()
+
+
+def test_proxy_jump(run_second_server):
+    """Test connecting to a second server through a jump host."""
+    if shutil.which("ssh") is None:
+        pytest.skip("OpenSSH client is required for proxy tests")
+    key_path = Path("tests/data/test_key").resolve()
+    key_path.chmod(0o600)
+    jump = Connection(
+        host="localhost",
+        port=8022,
+        username="root",
+        private_key=str(key_path),
+    )
+    conn = Connection(
+        host="localhost",
+        port=8023,
+        username="root",
+        password="husshtest",
+        proxy_jump=jump,
+    )
+    result = conn.execute("echo via jump host")
+    assert result.status == 0
+    assert "via jump host" in result.stdout
+    conn.close()
+    jump.close()
+
+
 def test_text_scp(conn):
     """Test that we can copy a file to the server and read it back."""
     # copy a local file to the server
