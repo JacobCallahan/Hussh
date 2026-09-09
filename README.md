@@ -85,6 +85,12 @@ conn.sftp_write(local_path="/path/to/my/file", remote_path="/dest/path/file")
 
 # Read a remote file
 contents = conn.sftp_read(remote_path="/dest/path/file")
+
+# Upload an entire local directory recursively
+transferred, failed = conn.sftp_put_dir("/local/build/", "/remote/app/")
+
+# Download an entire remote directory recursively
+transferred, failed = conn.sftp_get_dir("/remote/logs/", "/local/logs/")
 ```
 
 📚 **For complete documentation including SCP, file tailing, interactive shells, and more, see [Synchronous Usage](docs/synchronous.md).**

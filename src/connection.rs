@@ -67,7 +67,7 @@ use std::path::Path;
 
 use pyo3::exceptions::{PyIOError, PyTimeoutError};
 
-const MAX_BUFF_SIZE: usize = 65536;
+pub(crate) const MAX_BUFF_SIZE: usize = 65536;
 create_exception!(
     connection,
     AuthenticationError,
@@ -183,6 +183,26 @@ impl SSHResult {
 ///
 /// * `local_path`: The path to the file on the local system.
 /// * `remote_path`: The path to save the file on the remote system.
+///
+/// ### `sftp_put_dir`
+///
+/// Uploads a local directory recursively to a remote path over SFTP. Returns (transferred_files, failed_files). It takes the following parameters:
+///
+/// * `local_path`: The local directory to upload.
+/// * `remote_path`: The remote destination path.
+/// * `follow_symlinks`: Whether to follow symlinks (default: true).
+/// * `preserve_permissions`: Whether to preserve file permissions (default: true).
+/// * `fail_fast`: Whether to raise an exception on the first error instead of collecting failures (default: false).
+///
+/// ### `sftp_get_dir`
+///
+/// Downloads a remote directory recursively to a local path over SFTP. Returns (transferred_files, failed_files). It takes the following parameters:
+///
+/// * `remote_path`: The remote directory to download.
+/// * `local_path`: The local destination path.
+/// * `follow_symlinks`: Whether to follow symlinks (default: true).
+/// * `preserve_permissions`: Whether to preserve file permissions (default: true).
+/// * `fail_fast`: Whether to raise an exception on the first error instead of collecting failures (default: false).
 ///
 /// ### `shell`
 ///
@@ -559,6 +579,350 @@ impl Connection {
             .close()
             .map_err(|e| PyErr::new::<PyIOError, _>(format!("Close error: {}", e)))?;
         Ok(())
+    }
+
+    /// Uploads a local directory recursively to a remote path over SFTP.
+    /// Returns a tuple of (transferred_files, failed_files), where each is a list of local file paths.
+    /// If `fail_fast` is true, the first transfer error raises an exception immediately.
+    #[pyo3(signature = (local_path, remote_path, follow_symlinks=true, preserve_permissions=true, fail_fast=false))]
+    fn sftp_put_dir(
+        &mut self,
+        local_path: String,
+        remote_path: String,
+        follow_symlinks: bool,
+        preserve_permissions: bool,
+        fail_fast: bool,
+    ) -> PyResult<(Vec<String>, Vec<String>)> {
+        let mut transferred: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+
+        // Ensure remote base directory (and all missing parents) exist — like mkdir -p
+        {
+            let parts: Vec<&str> = remote_path.split('/').filter(|s| !s.is_empty()).collect();
+            let is_absolute = remote_path.starts_with('/');
+            let mut current = if is_absolute {
+                String::from("/")
+            } else {
+                String::new()
+            };
+            for part in &parts {
+                if !current.is_empty() && !current.ends_with('/') {
+                    current.push('/');
+                }
+                current.push_str(part);
+                if self.sftp().stat(Path::new(&current)).is_err() {
+                    if let Err(e) = self.sftp().mkdir(Path::new(&current), 0o755) {
+                        let msg = format!("Failed to create remote directory '{}': {}", current, e);
+                        if fail_fast {
+                            return Err(PyErr::new::<PyIOError, _>(msg));
+                        }
+                        failed.push(local_path.clone());
+                        return Ok((transferred, failed));
+                    }
+                }
+            }
+        }
+
+        // Stack for depth-first traversal: (local_dir, remote_dir_str).
+        // Remote paths are kept as POSIX strings to avoid OS-native path separators on Windows.
+        let mut dirs_to_process: Vec<(std::path::PathBuf, String)> =
+            vec![(std::path::PathBuf::from(&local_path), remote_path.clone())];
+
+        while let Some((local_dir, remote_dir)) = dirs_to_process.pop() {
+            let entries = match std::fs::read_dir(&local_dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    let msg = format!(
+                        "Failed to read local directory '{}': {}",
+                        local_dir.display(),
+                        e
+                    );
+                    if fail_fast {
+                        return Err(PyErr::new::<PyIOError, _>(msg));
+                    }
+                    failed.push(local_dir.to_string_lossy().to_string());
+                    continue;
+                }
+            };
+
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        if fail_fast {
+                            return Err(PyErr::new::<PyIOError, _>(format!(
+                                "Directory entry error: {}",
+                                e
+                            )));
+                        }
+                        continue;
+                    }
+                };
+
+                let local_entry = entry.path();
+                let local_entry_str = local_entry.to_string_lossy().to_string();
+                let file_name_str = entry.file_name().to_string_lossy().to_string();
+                let remote_entry_str = format!("{}/{}", remote_dir, file_name_str);
+
+                let metadata = match if follow_symlinks {
+                    std::fs::metadata(&local_entry)
+                } else {
+                    std::fs::symlink_metadata(&local_entry)
+                } {
+                    Ok(m) => m,
+                    Err(e) => {
+                        if fail_fast {
+                            return Err(PyErr::new::<PyIOError, _>(format!(
+                                "Metadata error for '{}': {}",
+                                local_entry_str, e
+                            )));
+                        }
+                        failed.push(local_entry_str);
+                        continue;
+                    }
+                };
+
+                if metadata.is_dir() {
+                    #[cfg(unix)]
+                    let mode = if preserve_permissions {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode() as i32
+                    } else {
+                        0o755i32
+                    };
+                    #[cfg(not(unix))]
+                    let mode = 0o755i32;
+                    if self.sftp().stat(Path::new(&remote_entry_str)).is_err() {
+                        match self.sftp().mkdir(Path::new(&remote_entry_str), mode) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                if fail_fast {
+                                    return Err(PyErr::new::<PyIOError, _>(format!(
+                                        "Failed to create remote directory '{}': {}",
+                                        remote_entry_str, e
+                                    )));
+                                }
+                                failed.push(local_entry_str);
+                                continue;
+                            }
+                        }
+                    }
+                    dirs_to_process.push((local_entry, remote_entry_str));
+                } else if metadata.is_file() {
+                    let result: Result<(), String> = (|| {
+                        let mut local_file = std::fs::File::open(&local_entry)
+                            .map_err(|e| format!("File open error: {}", e))?;
+                        let file_size = metadata.len();
+                        let mut remote_file = self
+                            .sftp()
+                            .create(Path::new(&remote_entry_str))
+                            .map_err(|e| format!("Remote file creation error: {}", e))?;
+                        let buf_size = (file_size as usize).min(MAX_BUFF_SIZE);
+                        // Fall back to MAX_BUFF_SIZE for empty files (size 0) so the read loop can still run.
+                        let buf_size = if buf_size == 0 {
+                            MAX_BUFF_SIZE
+                        } else {
+                            buf_size
+                        };
+                        let mut buffer = vec![0u8; buf_size];
+                        loop {
+                            let n = local_file
+                                .read(&mut buffer)
+                                .map_err(|e| format!("File read error: {}", e))?;
+                            if n == 0 {
+                                break;
+                            }
+                            remote_file
+                                .write_all(&buffer[..n])
+                                .map_err(|e| format!("Remote write error: {}", e))?;
+                        }
+                        remote_file
+                            .close()
+                            .map_err(|e| format!("Close error: {}", e))?;
+                        #[cfg(unix)]
+                        if preserve_permissions {
+                            use std::os::unix::fs::PermissionsExt;
+                            let mode = metadata.permissions().mode();
+                            let _ = self.sftp().setstat(
+                                Path::new(&remote_entry_str),
+                                ssh2::FileStat {
+                                    perm: Some(mode),
+                                    size: None,
+                                    uid: None,
+                                    gid: None,
+                                    atime: None,
+                                    mtime: None,
+                                },
+                            );
+                        }
+                        Ok(())
+                    })();
+                    match result {
+                        Ok(_) => transferred.push(local_entry_str),
+                        Err(e) => {
+                            if fail_fast {
+                                return Err(PyErr::new::<PyIOError, _>(e));
+                            }
+                            failed.push(local_entry_str);
+                        }
+                    }
+                }
+                // Symlinks with follow_symlinks=false are skipped
+            }
+        }
+
+        Ok((transferred, failed))
+    }
+
+    /// Downloads a remote directory recursively to a local path over SFTP.
+    /// Returns a tuple of (transferred_files, failed_files), where each is a list of remote file paths.
+    /// If `fail_fast` is true, the first transfer error raises an exception immediately.
+    #[pyo3(signature = (remote_path, local_path, follow_symlinks=true, preserve_permissions=true, fail_fast=false))]
+    fn sftp_get_dir(
+        &mut self,
+        remote_path: String,
+        local_path: String,
+        follow_symlinks: bool,
+        preserve_permissions: bool,
+        fail_fast: bool,
+    ) -> PyResult<(Vec<String>, Vec<String>)> {
+        let mut transferred: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+
+        // Ensure local base directory exists
+        if let Err(e) = std::fs::create_dir_all(&local_path) {
+            let msg = format!("Failed to create local directory '{}': {}", local_path, e);
+            if fail_fast {
+                return Err(PyErr::new::<PyIOError, _>(msg));
+            }
+            failed.push(remote_path);
+            return Ok((transferred, failed));
+        }
+
+        // Stack for depth-first traversal: (remote_dir_str, local_dir).
+        // Remote paths are kept as POSIX strings to avoid OS-native path separators on Windows.
+        let mut dirs_to_process: Vec<(String, std::path::PathBuf)> =
+            vec![(remote_path.clone(), std::path::PathBuf::from(&local_path))];
+
+        while let Some((remote_dir, local_dir)) = dirs_to_process.pop() {
+            let remote_dir_str = remote_dir.clone();
+            let entries = match self.sftp().readdir(Path::new(&remote_dir_str)) {
+                Ok(e) => e,
+                Err(e) => {
+                    let msg = format!(
+                        "Failed to read remote directory '{}': {}",
+                        remote_dir_str, e
+                    );
+                    if fail_fast {
+                        return Err(PyErr::new::<PyIOError, _>(msg));
+                    }
+                    failed.push(remote_dir_str);
+                    continue;
+                }
+            };
+
+            for (entry_name, stat) in entries {
+                let file_name = match entry_name.file_name() {
+                    Some(n) => n.to_os_string(),
+                    None => {
+                        if fail_fast {
+                            return Err(PyErr::new::<PyIOError, _>("Invalid entry path"));
+                        }
+                        continue;
+                    }
+                };
+                let file_name_str = file_name.to_string_lossy();
+                let local_entry = local_dir.join(&file_name);
+                // Build remote path with POSIX separator to stay cross-platform.
+                let remote_entry_str = format!("{}/{}", remote_dir, file_name_str);
+
+                // When follow_symlinks=true, resolve symlinks on remote via stat()
+                let resolved_stat = if follow_symlinks && stat.file_type().is_symlink() {
+                    self.sftp()
+                        .stat(Path::new(&remote_entry_str))
+                        .unwrap_or(stat)
+                } else {
+                    stat
+                };
+
+                if resolved_stat.file_type().is_symlink() {
+                    // follow_symlinks=false: skip symlinks
+                    continue;
+                } else if resolved_stat.is_dir() {
+                    match std::fs::create_dir_all(&local_entry) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            if fail_fast {
+                                return Err(PyErr::new::<PyIOError, _>(format!(
+                                    "Failed to create local directory '{}': {}",
+                                    local_entry.display(),
+                                    e
+                                )));
+                            }
+                            failed.push(remote_entry_str);
+                            continue;
+                        }
+                    }
+                    #[cfg(unix)]
+                    if preserve_permissions {
+                        if let Some(perm) = resolved_stat.perm {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &local_entry,
+                                std::fs::Permissions::from_mode(perm & 0o7777),
+                            );
+                        }
+                    }
+                    dirs_to_process.push((remote_entry_str, local_entry));
+                } else if resolved_stat.is_file() {
+                    let result: Result<(), String> = (|| {
+                        let mut remote_file = BufReader::new(
+                            self.sftp()
+                                .open(Path::new(&remote_entry_str))
+                                .map_err(|e| format!("SFTP open error: {}", e))?,
+                        );
+                        let local_file = std::fs::File::create(&local_entry)
+                            .map_err(|e| format!("File create error: {}", e))?;
+                        let mut writer = BufWriter::new(local_file);
+                        let mut buffer = vec![0u8; MAX_BUFF_SIZE];
+                        loop {
+                            let n = remote_file
+                                .read(&mut buffer)
+                                .map_err(|e| format!("File read error: {}", e))?;
+                            if n == 0 {
+                                break;
+                            }
+                            writer
+                                .write_all(&buffer[..n])
+                                .map_err(|e| format!("File write error: {}", e))?;
+                        }
+                        writer.flush().map_err(|e| format!("Flush error: {}", e))?;
+                        #[cfg(unix)]
+                        if preserve_permissions {
+                            if let Some(perm) = resolved_stat.perm {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &local_entry,
+                                    std::fs::Permissions::from_mode(perm & 0o7777),
+                                );
+                            }
+                        }
+                        Ok(())
+                    })();
+                    match result {
+                        Ok(_) => transferred.push(remote_entry_str),
+                        Err(e) => {
+                            if fail_fast {
+                                return Err(PyErr::new::<PyIOError, _>(e));
+                            }
+                            failed.push(remote_entry_str);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((transferred, failed))
     }
 
     // Copy a file from this connection to another connection

@@ -212,6 +212,88 @@ def test_sftp_write_data(conn):
     assert read_text == "hello"
 
 
+def test_sftp_put_dir(conn, tmp_path):
+    """Test that we can recursively upload a directory tree over SFTP."""
+    # Create a local directory tree
+    src = tmp_path / "src_dir"
+    src.mkdir()
+    (src / "file1.txt").write_text("file1 content")
+    (src / "file2.txt").write_text("file2 content")
+    sub = src / "subdir"
+    sub.mkdir()
+    (sub / "nested.txt").write_text("nested content")
+
+    # Upload to remote
+    transferred, failed = conn.sftp_put_dir(str(src), "/root/test_put_dir")
+
+    # Verify files exist on remote
+    remote_ls = conn.execute("find /root/test_put_dir -type f | sort").stdout
+    assert "file1.txt" in remote_ls
+    assert "file2.txt" in remote_ls
+    assert "nested.txt" in remote_ls
+    expected_file_count = 3
+    assert len(transferred) == expected_file_count
+    assert len(failed) == 0
+    # Transferred list contains local paths
+    assert any("file1.txt" in p for p in transferred)
+
+    # Verify nested file contents
+    content = conn.sftp_read("/root/test_put_dir/subdir/nested.txt")
+    assert content == "nested content"
+
+    # Cleanup
+    conn.execute("rm -rf /root/test_put_dir")
+
+
+def test_sftp_get_dir(conn, tmp_path):
+    """Test that we can recursively download a directory tree over SFTP."""
+    # Set up a remote directory tree
+    conn.execute("mkdir -p /root/test_get_dir/subdir")
+    conn.sftp_write_data("remote file 1", "/root/test_get_dir/file1.txt")
+    conn.sftp_write_data("remote file 2", "/root/test_get_dir/file2.txt")
+    conn.sftp_write_data("nested remote", "/root/test_get_dir/subdir/nested.txt")
+
+    # Download to local
+    dest = tmp_path / "dest_dir"
+    transferred, failed = conn.sftp_get_dir("/root/test_get_dir", str(dest))
+
+    # Verify local files
+    assert (dest / "file1.txt").read_text() == "remote file 1"
+    assert (dest / "file2.txt").read_text() == "remote file 2"
+    assert (dest / "subdir" / "nested.txt").read_text() == "nested remote"
+    expected_file_count = 3
+    assert len(transferred) == expected_file_count
+    assert len(failed) == 0
+    # Transferred list contains remote paths
+    assert any("file1.txt" in p for p in transferred)
+
+    # Cleanup
+    conn.execute("rm -rf /root/test_get_dir")
+
+
+def test_sftp_put_dir_fail_fast(conn, tmp_path):
+    """Test that sftp_put_dir with fail_fast=True raises on error."""
+    src = tmp_path / "src_fail"
+    src.mkdir()
+    (src / "ok.txt").write_text("ok")
+
+    # Pre-create a *file* at the target path so that attempting to create a
+    # sub-directory inside it fails, even after mkdir-p creates its parents.
+    conn.sftp_write_data("blocking", "/root/put_dir_fail_target")
+    try:
+        with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
+            conn.sftp_put_dir(str(src), "/root/put_dir_fail_target/deep", fail_fast=True)
+    finally:
+        conn.execute("rm -f /root/put_dir_fail_target")
+
+
+def test_sftp_get_dir_fail_fast(conn, tmp_path):
+    """Test that sftp_get_dir with fail_fast=True raises on error."""
+    dest = tmp_path / "dest_fail"
+    with pytest.raises(OSError, match=r"(?i)(failed|error|no such)"):
+        conn.sftp_get_dir("/path/does/not/exist", str(dest), fail_fast=True)
+
+
 @pytest.mark.skip("non-text files are not supported by sftp")
 def test_non_utf8_sftp(conn):
     """Test that we can copy a non-text file to the server and read it back."""
