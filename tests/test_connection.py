@@ -170,6 +170,47 @@ def test_proxy_command():
     conn.close()
 
 
+def test_proxy_options_mutually_exclusive():
+    """Test that proxy_jump and proxy_command cannot both be provided."""
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        Connection(
+            host="localhost",
+            port=8022,
+            username="root",
+            proxy_jump=("localhost", 8022),
+            proxy_command="nc %h %p",
+        )
+
+
+def test_proxy_jump_invalid_format():
+    """Test invalid proxy_jump type validation."""
+    with pytest.raises(TypeError, match="proxy_jump must be"):
+        Connection(
+            host="localhost",
+            port=8022,
+            username="root",
+            proxy_jump=123,
+        )
+    with pytest.raises(TypeError, match="port must be a valid integer"):
+        Connection(
+            host="localhost",
+            port=8022,
+            username="root",
+            proxy_jump="bastion:not-a-port",
+        )
+
+
+def test_proxy_command_failure():
+    """Test failure when proxy command cannot execute."""
+    with pytest.raises(RuntimeError, match="Failed to start proxy command"):
+        Connection(
+            host="localhost",
+            port=8022,
+            username="root",
+            proxy_command="nonexistent_hussh_proxy_cmd %h %p",
+        )
+
+
 def test_proxy_jump(run_second_server):
     """Test connecting to a second server through a jump host."""
     if shutil.which("ssh") is None:

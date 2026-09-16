@@ -65,7 +65,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::net::TcpStream;
 use std::path::Path;
 
-use pyo3::exceptions::{PyIOError, PyTimeoutError, PyTypeError};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyTimeoutError, PyTypeError};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
@@ -172,11 +172,7 @@ fn shell_quote(value: &str) -> String {
 
 fn build_proxy_jump_command(target_host: &str, target_port: i32, jump: &ProxyJumpConfig) -> String {
     let username = jump.username.as_deref().unwrap_or("root");
-    let mut command = format!(
-        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -l {} -p {}",
-        shell_quote(username),
-        jump.port
-    );
+    let mut command = format!("ssh -l {} -p {}", shell_quote(username), jump.port);
 
     if let Some(private_key) = jump.private_key.as_deref() {
         let expanded_key = shellexpand::tilde(private_key).into_owned();
@@ -199,27 +195,27 @@ fn render_proxy_command(command: &str, host: &str, port: i32) -> String {
 #[cfg(unix)]
 fn create_proxy_stream(command: &str) -> PyResult<(UnixStream, Child)> {
     let (stream, proxy_side) = UnixStream::pair().map_err(|e| {
-        PyErr::new::<PyTimeoutError, _>(format!("Failed to create proxy transport: {}", e))
+        PyErr::new::<PyIOError, _>(format!("Failed to create proxy transport: {}", e))
     })?;
-    let stdin_side = proxy_side.try_clone().map_err(|e| {
-        PyErr::new::<PyTimeoutError, _>(format!("Failed to clone proxy stream: {}", e))
-    })?;
+    let stdin_side = proxy_side
+        .try_clone()
+        .map_err(|e| PyErr::new::<PyIOError, _>(format!("Failed to clone proxy stream: {}", e)))?;
     let child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .stdin(Stdio::from(stdin_side))
         .stdout(Stdio::from(proxy_side))
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| {
-            PyErr::new::<PyTimeoutError, _>(format!("Failed to start proxy command: {}", e))
+            PyErr::new::<PyRuntimeError, _>(format!("Failed to start proxy command: {}", e))
         })?;
     Ok((stream, child))
 }
 
 #[cfg(not(unix))]
 fn create_proxy_stream(_command: &str) -> PyResult<(TcpStream, Child)> {
-    Err(PyErr::new::<PyTimeoutError, _>(
+    Err(PyErr::new::<PyRuntimeError, _>(
         "proxy_command and proxy_jump are currently only supported on Unix platforms",
     ))
 }
@@ -433,6 +429,12 @@ impl Connection {
         if proxy_jump.is_some() && proxy_command.is_some() {
             return Err(PyErr::new::<PyTypeError, _>(
                 "proxy_jump and proxy_command are mutually exclusive",
+            ));
+        }
+        #[cfg(not(unix))]
+        if proxy_jump.is_some() || proxy_command.is_some() {
+            return Err(PyErr::new::<PyRuntimeError, _>(
+                "proxy_command and proxy_jump are currently only supported on Unix platforms",
             ));
         }
         let effective_proxy_command = if let Some(jump_cfg) = proxy_jump.as_ref() {

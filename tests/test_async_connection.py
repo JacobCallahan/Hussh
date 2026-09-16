@@ -69,6 +69,73 @@ async def test_async_proxy_jump(run_test_server, run_second_server):
         assert result.status == 0
         assert "async via jump host" in result.stdout
 
+
+@pytest.mark.asyncio
+async def test_async_proxy_options_mutually_exclusive():
+    """Test that proxy_jump and proxy_command cannot both be provided."""
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        AsyncConnection(
+            "localhost",
+            username="root",
+            proxy_jump=("localhost", 8022),
+            proxy_command="nc %h %p",
+        )
+
+
+@pytest.mark.asyncio
+async def test_async_proxy_jump_invalid_format():
+    """Test invalid proxy_jump type validation."""
+    with pytest.raises(TypeError, match="proxy_jump must be"):
+        AsyncConnection(
+            "localhost",
+            username="root",
+            proxy_jump=123,
+        )
+    with pytest.raises(TypeError, match="port must be a valid integer"):
+        AsyncConnection(
+            "localhost",
+            username="root",
+            proxy_jump="bastion:not-a-port",
+        )
+
+
+@pytest.mark.asyncio
+async def test_async_proxy_command_failure():
+    """Test failure when proxy command cannot execute."""
+    conn = AsyncConnection(
+        "localhost",
+        username="root",
+        proxy_command="nonexistent_hussh_proxy_cmd %h %p",
+    )
+    with pytest.raises(RuntimeError, match="Failed to start proxy command"):
+        await conn.connect()
+
+
+@pytest.mark.asyncio
+async def test_async_private_key_alias(run_test_server):
+    """Test that private_key alias works for async connections."""
+    async with AsyncConnection(
+        "localhost",
+        username="root",
+        private_key="tests/data/test_key",
+        port=8022,
+    ) as conn:
+        result = await conn.execute("echo alias key")
+        assert result.status == 0
+        assert "alias key" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_async_private_key_alias_conflict():
+    """Test that key_path and private_key aliases cannot both be provided."""
+    with pytest.raises(TypeError, match="aliases; provide only one"):
+        AsyncConnection(
+            "localhost",
+            username="root",
+            key_path="tests/data/test_key",
+            private_key="tests/data/test_key",
+        )
+
 @pytest.mark.asyncio
 async def test_async_sftp(run_test_server, tmp_path):
     async with AsyncConnection("localhost", username="root", password="toor", port=8022) as conn:

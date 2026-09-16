@@ -34,19 +34,23 @@ asyncio.run(main())
 
 ### Key-Based Authentication
 ```python
-async with AsyncConnection(host="my.test.server", private_key="~/.ssh/id_rsa") as conn:
+async with AsyncConnection(host="my.test.server", key_path="~/.ssh/id_rsa") as conn:
     result = await conn.execute("whoami")
 
 # With password-protected key
 async with AsyncConnection(
     host="my.test.server",
-    private_key="~/.ssh/id_rsa",
+    key_path="~/.ssh/id_rsa",
     password="keypass"
 ) as conn:
     result = await conn.execute("whoami")
+
+# `private_key=` is also accepted as an alias for `key_path=`.
 ```
 
 ### SSH Agent Authentication
+Async connections currently authenticate with explicit credentials or discovered default key files.
+When no `password`, `key_path`, or `private_key` is provided, Hussh attempts default keys from `~/.ssh`.
 
 ### Jump Hosts and Proxy Commands
 ```python
