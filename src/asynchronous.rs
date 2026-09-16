@@ -230,11 +230,7 @@ fn build_async_proxy_jump_command(
     jump: &AsyncProxyJumpConfig,
 ) -> String {
     let username = jump.username.as_deref().unwrap_or("root");
-    let mut command = format!(
-        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -l {} -p {}",
-        shell_quote(username),
-        jump.port
-    );
+    let mut command = format!("ssh -l {} -p {}", shell_quote(username), jump.port);
     if let Some(key_path) = jump.key_path.as_deref() {
         let expanded_key = shellexpand::tilde(key_path).into_owned();
         command.push_str(&format!(" -i {}", shell_quote(&expanded_key)));
@@ -272,7 +268,7 @@ fn create_async_proxy_stream(
         .arg(command)
         .stdin(Stdio::from(stdin_side))
         .stdout(Stdio::from(proxy_std))
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to start proxy command: {}", e)))?;
 
@@ -420,12 +416,11 @@ pub struct AsyncConnection {
 
 impl Drop for AsyncConnection {
     fn drop(&mut self) {
-        if let Ok(mut proxy_guard) = self.proxy_process.try_lock() {
-            if let Some(child) = proxy_guard.as_mut() {
-                let _ = child.start_kill();
-            }
-            *proxy_guard = None;
+        let mut proxy_guard = self.proxy_process.blocking_lock();
+        if let Some(child) = proxy_guard.as_mut() {
+            let _ = child.start_kill();
         }
+        *proxy_guard = None;
     }
 }
 
@@ -1204,19 +1199,27 @@ impl AsyncConnection {
 #[pymethods]
 impl AsyncConnection {
     #[new]
-    #[pyo3(signature = (host, username=None, password=None, key_path=None, proxy_jump=None, proxy_command=None, port=22, keepalive_interval=0, timeout=0))]
+    #[pyo3(signature = (host, username=None, password=None, key_path=None, private_key=None, proxy_jump=None, proxy_command=None, port=22, keepalive_interval=0, timeout=0))]
     pub fn new(
         _py: Python<'_>,
         host: String,
         username: Option<String>,
         password: Option<String>,
         key_path: Option<String>,
+        private_key: Option<String>,
         proxy_jump: Option<Bound<'_, PyAny>>,
         proxy_command: Option<String>,
         port: u16,
         keepalive_interval: u64,
         timeout: u64,
     ) -> PyResult<Self> {
+        if key_path.is_some() && private_key.is_some() {
+            return Err(PyErr::new::<PyTypeError, _>(
+                "key_path and private_key are aliases; provide only one",
+            ));
+        }
+        let key_path = key_path.or(private_key);
+
         let proxy_jump = match proxy_jump {
             Some(value) => Some(parse_async_proxy_jump(&value)?),
             None => None,
@@ -1224,6 +1227,12 @@ impl AsyncConnection {
         if proxy_jump.is_some() && proxy_command.is_some() {
             return Err(PyErr::new::<PyTypeError, _>(
                 "proxy_jump and proxy_command are mutually exclusive",
+            ));
+        }
+        #[cfg(not(unix))]
+        if proxy_jump.is_some() || proxy_command.is_some() {
+            return Err(PyErr::new::<PyRuntimeError, _>(
+                "proxy_command and proxy_jump are currently only supported on Unix platforms",
             ));
         }
 
