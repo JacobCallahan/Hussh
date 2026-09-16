@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import shutil
 
+from conftest import container_internal_address
 import pytest
 
 from hussh.aio import AsyncConnection
@@ -42,7 +43,8 @@ async def test_async_proxy_command(run_test_server):
         "localhost",
         username="root",
         password="husshtest",
-        port=8022,
+        port=22,
+        private_key=str(key_path),
         proxy_command=proxy_command,
     ) as conn:
         result = await conn.execute("echo async proxy command")
@@ -58,11 +60,16 @@ async def test_async_proxy_jump(run_test_server, run_second_server):
     key_path = Path("tests/data/test_key").resolve()
     key_path.chmod(0o600)
     jump = AsyncConnection("localhost", username="root", key_path=str(key_path), port=8022)
+    # The final target must be reachable from *inside* the jump host's network
+    # namespace, so use the second container's internal IP/port rather than the
+    # host-published port used to reach it from the test runner.
+    target_host, target_port = container_internal_address(run_second_server)
     async with AsyncConnection(
-        "localhost",
+        target_host,
         username="root",
         password="husshtest",
-        port=8023,
+        port=target_port,
+        key_path=str(key_path),
         proxy_jump=jump,
     ) as conn:
         result = await conn.execute("echo async via jump host")
@@ -105,6 +112,7 @@ async def test_async_proxy_command_failure():
     conn = AsyncConnection(
         "localhost",
         username="root",
+        port=22,
         proxy_command="nonexistent_hussh_proxy_cmd %h %p",
     )
     with pytest.raises(RuntimeError, match="Failed to start proxy command"):
@@ -135,6 +143,7 @@ async def test_async_private_key_alias_conflict():
             key_path="tests/data/test_key",
             private_key="tests/data/test_key",
         )
+
 
 @pytest.mark.asyncio
 async def test_async_sftp(run_test_server, tmp_path):
