@@ -230,7 +230,15 @@ fn build_async_proxy_jump_command(
     jump: &AsyncProxyJumpConfig,
 ) -> String {
     let username = jump.username.as_deref().unwrap_or("root");
-    let mut command = format!("ssh -l {} -p {}", shell_quote(username), jump.port);
+    // Match the MVP's "blindly accept keys" behavior for the final hop (see
+    // ClientHandler::check_server_key) by also skipping host key verification
+    // for the jump hop, since there's no mechanism yet for users to manage a
+    // known_hosts file for jump hosts.
+    let mut command = format!(
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -l {} -p {}",
+        shell_quote(username),
+        jump.port
+    );
     if let Some(key_path) = jump.key_path.as_deref() {
         let expanded_key = shellexpand::tilde(key_path).into_owned();
         command.push_str(&format!(" -i {}", shell_quote(&expanded_key)));
@@ -249,7 +257,7 @@ fn render_proxy_command(command: &str, host: &str, port: u16) -> String {
 }
 
 #[cfg(unix)]
-fn create_async_proxy_stream(
+async fn create_async_proxy_stream(
     command: &str,
 ) -> PyResult<(tokio::net::UnixStream, tokio::process::Child)> {
     let (client_std, proxy_std) = std::os::unix::net::UnixStream::pair()
@@ -263,20 +271,37 @@ fn create_async_proxy_stream(
     let stdin_side = proxy_std
         .try_clone()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to clone proxy stream: {}", e)))?;
-    let child = tokio::process::Command::new("sh")
+    let mut child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
-        .stdin(Stdio::from(stdin_side))
-        .stdout(Stdio::from(proxy_std))
-        .stderr(Stdio::null())
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(stdin_side)))
+        .stdout(Stdio::from(std::os::fd::OwnedFd::from(proxy_std)))
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to start proxy command: {}", e)))?;
+
+    // The shell itself always spawns successfully, even if the proxy command it
+    // runs doesn't exist. Give it a brief moment to fail fast (e.g. "command not
+    // found") so we can surface a clear error instead of a confusing downstream
+    // handshake timeout.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    if let Ok(Some(status)) = child.try_wait() {
+        let mut stderr_output = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut stderr_output).await;
+        }
+        return Err(PyRuntimeError::new_err(format!(
+            "Failed to start proxy command (exited with {}): {}",
+            status,
+            stderr_output.trim()
+        )));
+    }
 
     Ok((client_stream, child))
 }
 
 #[cfg(not(unix))]
-fn create_async_proxy_stream(
+async fn create_async_proxy_stream(
     _command: &str,
 ) -> PyResult<(tokio::net::TcpStream, tokio::process::Child)> {
     Err(PyRuntimeError::new_err(
@@ -298,7 +323,7 @@ impl Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        _server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         // For now, we blindly accept keys (MVP).
         Ok(true)
@@ -416,7 +441,20 @@ pub struct AsyncConnection {
 
 impl Drop for AsyncConnection {
     fn drop(&mut self) {
-        let mut proxy_guard = self.proxy_process.blocking_lock();
+        // `execute`/`connect`/etc. each clone `self` internally to move into a
+        // spawned future; when that clone's future completes, the clone is
+        // dropped even though the proxy process (shared via Arc) must keep
+        // running for the original connection. Only tear down the proxy
+        // process when this is the last surviving reference to it.
+        if Arc::strong_count(&self.proxy_process) > 1 {
+            return;
+        }
+        // Use a non-blocking lock: `blocking_lock` panics when called from within
+        // a Tokio runtime thread (which is the common case here), so we best-effort
+        // clean up the proxy process without blocking the async executor.
+        let Ok(mut proxy_guard) = self.proxy_process.try_lock() else {
+            return;
+        };
         if let Some(child) = proxy_guard.as_mut() {
             let _ = child.start_kill();
         }
@@ -498,7 +536,7 @@ impl AsyncConnection {
             let handler = ClientHandler {};
             let mut session = if let Some(command) = proxy_command.as_deref() {
                 let rendered = render_proxy_command(command, &host, port);
-                let (proxy_stream, child) = create_async_proxy_stream(&rendered)?;
+                let (proxy_stream, child) = create_async_proxy_stream(&rendered).await?;
                 {
                     let mut proxy_guard = proxy_process_arc.lock().await;
                     *proxy_guard = Some(child);
@@ -1151,6 +1189,7 @@ impl AsyncConnection {
         Ok((transferred, failed))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create(
         host: String,
         username: Option<String>,
@@ -1199,6 +1238,7 @@ impl AsyncConnection {
 #[pymethods]
 impl AsyncConnection {
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (host, username=None, password=None, key_path=None, private_key=None, proxy_jump=None, proxy_command=None, port=22, keepalive_interval=0, timeout=0))]
     pub fn new(
         _py: Python<'_>,

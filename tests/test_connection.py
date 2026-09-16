@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import time
 
+from conftest import container_internal_address
 import pytest
 
 from hussh import AuthenticationError, Connection, SSHResult
@@ -157,11 +158,15 @@ def test_proxy_command():
         "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
         f"-i {key_path} -p 8022 root@localhost -W %h:%p"
     )
+    # %h/%p resolve to the connection's own host/port, which must be reachable
+    # from *inside* the jump host's network namespace, not the host-published
+    # port (8022) used to reach the container from the test runner.
     conn = Connection(
         host="localhost",
-        port=8022,
+        port=22,
         username="root",
         password="husshtest",
+        private_key=str(key_path),
         proxy_command=proxy_command,
     )
     result = conn.execute("echo proxy command")
@@ -205,7 +210,7 @@ def test_proxy_command_failure():
     with pytest.raises(RuntimeError, match="Failed to start proxy command"):
         Connection(
             host="localhost",
-            port=8022,
+            port=22,
             username="root",
             proxy_command="nonexistent_hussh_proxy_cmd %h %p",
         )
@@ -223,11 +228,16 @@ def test_proxy_jump(run_second_server):
         username="root",
         private_key=str(key_path),
     )
+    # The final target must be reachable from *inside* the jump host's network
+    # namespace, so use the second container's internal IP/port rather than the
+    # host-published port used to reach it from the test runner.
+    target_host, target_port = container_internal_address(run_second_server)
     conn = Connection(
-        host="localhost",
-        port=8023,
+        host=target_host,
+        port=target_port,
         username="root",
         password="husshtest",
+        private_key=str(key_path),
         proxy_jump=jump,
     )
     result = conn.execute("echo via jump host")

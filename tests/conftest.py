@@ -53,6 +53,20 @@ def pytest_addoption(parser):
     )
 
 
+def container_internal_address(container, port=22):
+    """Get a (ip, port) address for a container that is reachable from other containers.
+
+    Proxy commands and jump hosts execute in a different network namespace than
+    the pytest process, so the host-published port (e.g. 8022) isn't reachable;
+    the container's own network-internal IP and native SSH port must be used
+    instead.
+    """
+    container.reload()
+    networks = container.attrs["NetworkSettings"]["Networks"]
+    ip_address = next(iter(networks.values()))["IPAddress"]
+    return ip_address, port
+
+
 @pytest.fixture(scope="session")
 def num_servers(request):
     """Get the number of test servers to spawn."""

@@ -172,7 +172,15 @@ fn shell_quote(value: &str) -> String {
 
 fn build_proxy_jump_command(target_host: &str, target_port: i32, jump: &ProxyJumpConfig) -> String {
     let username = jump.username.as_deref().unwrap_or("root");
-    let mut command = format!("ssh -l {} -p {}", shell_quote(username), jump.port);
+    // Match the MVP's "blindly accept keys" behavior for the final hop (see
+    // ClientHandler::check_server_key) by also skipping host key verification
+    // for the jump hop, since there's no mechanism yet for users to manage a
+    // known_hosts file for jump hosts.
+    let mut command = format!(
+        "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -l {} -p {}",
+        shell_quote(username),
+        jump.port
+    );
 
     if let Some(private_key) = jump.private_key.as_deref() {
         let expanded_key = shellexpand::tilde(private_key).into_owned();
@@ -200,16 +208,33 @@ fn create_proxy_stream(command: &str) -> PyResult<(UnixStream, Child)> {
     let stdin_side = proxy_side
         .try_clone()
         .map_err(|e| PyErr::new::<PyIOError, _>(format!("Failed to clone proxy stream: {}", e)))?;
-    let child = Command::new("sh")
+    let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
-        .stdin(Stdio::from(stdin_side))
-        .stdout(Stdio::from(proxy_side))
-        .stderr(Stdio::null())
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(stdin_side)))
+        .stdout(Stdio::from(std::os::fd::OwnedFd::from(proxy_side)))
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             PyErr::new::<PyRuntimeError, _>(format!("Failed to start proxy command: {}", e))
         })?;
+
+    // The shell itself always spawns successfully, even if the proxy command it
+    // runs doesn't exist. Give it a brief moment to fail fast (e.g. "command not
+    // found") so we can surface a clear error instead of a confusing downstream
+    // handshake timeout.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    if let Ok(Some(status)) = child.try_wait() {
+        let mut stderr_output = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut stderr_output);
+        }
+        return Err(PyErr::new::<PyRuntimeError, _>(format!(
+            "Failed to start proxy command (exited with {}): {}",
+            status,
+            stderr_output.trim()
+        )));
+    }
     Ok((stream, child))
 }
 
@@ -409,6 +434,7 @@ impl Drop for Connection {
 impl Connection {
     #[new]
     #[pyo3(signature = (host, port=22, username="root", password=None, private_key=None, proxy_jump=None, proxy_command=None, timeout=0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         host: &str,
