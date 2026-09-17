@@ -68,7 +68,7 @@ pyo3::create_exception!(
 /// ### `raise_if_any_failed`
 /// Raises a PartialFailureException if any results have non-zero status.
 ///
-#[pyclass(mapping)]
+#[pyclass(mapping, from_py_object)]
 #[derive(Clone)]
 pub struct MultiResult {
     results: HashMap<String, SSHResult>,
