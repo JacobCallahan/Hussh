@@ -19,7 +19,7 @@ shellexpand = "3.1.0"
 pyo3-async-runtimes = { version = "0.26.0", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["full"] }
 russh = { version = "0.63", default-features = false, features = ["flate2", "async-trait", "ring", "rsa"] }
-russh-sftp = "2.1"
+russh-sftp = "3.0"
 async-trait = "0.1"
 
 [profile.release]
