@@ -235,6 +235,9 @@ fn create_proxy_stream(command: &str) -> PyResult<(UnixStream, Child)> {
             stderr_output.trim()
         )));
     }
+    // Process is still running; drop stderr to prevent blocking if the proxy
+    // writes diagnostics during operation.
+    drop(child.stderr.take());
     Ok((stream, child))
 }
 
