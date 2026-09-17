@@ -248,7 +248,7 @@ fn create_proxy_stream(_command: &str) -> PyResult<(TcpStream, Child)> {
     ))
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct SSHResult {
     #[pyo3(get)]
@@ -1219,13 +1219,13 @@ impl Connection {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct ChannelWrapper {
     channel: Channel,
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct InteractiveShell {
     channel: ChannelWrapper,

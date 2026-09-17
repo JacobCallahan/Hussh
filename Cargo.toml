@@ -14,9 +14,9 @@ async = []
 [dependencies]
 ssh2 = "0.9.5"
 openssl = { version = "0.10", features = ["vendored"] }
-pyo3 = { version = "0.26.0", features = ["generate-import-lib"] }
+pyo3 = { version = "0.29.2", features = ["generate-import-lib"] }
 shellexpand = "3.1.0"
-pyo3-async-runtimes = { version = "0.26.0", features = ["tokio-runtime"] }
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["full"] }
 russh = { version = "0.63", default-features = false, features = ["flate2", "async-trait", "ring", "rsa"] }
 russh-sftp = "3.0"

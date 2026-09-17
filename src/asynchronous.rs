@@ -423,7 +423,7 @@ impl Handler for ClientHandler {
 ///
 /// Closes the SSH connection.
 ///
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct AsyncConnection {
     host: String,
@@ -1523,7 +1523,7 @@ impl AsyncConnection {
 ///
 /// Closes the shell.
 ///
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct AsyncInteractiveShell {
     channel: Arc<Mutex<russh::Channel<russh::client::Msg>>>,
@@ -1672,7 +1672,7 @@ struct TailerState {
 ///
 /// * `from_pos`: Optional position to start reading from (default: last read position).
 ///
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct AsyncFileTailer {
     conn_session: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
