@@ -296,6 +296,9 @@ async fn create_async_proxy_stream(
             stderr_output.trim()
         )));
     }
+    // Process is still running; drop stderr to prevent blocking if the proxy
+    // writes diagnostics during operation.
+    drop(child.stderr.take());
 
     Ok((client_stream, child))
 }

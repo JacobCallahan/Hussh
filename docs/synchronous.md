@@ -37,8 +37,6 @@ conn = Connection(host="my.test.server", private_key="~/.ssh/id_rsa")
 conn = Connection(host="my.test.server", private_key="~/.ssh/id_rsa", password="pass")
 ```
 
-### SSH Agent Authentication
-
 ### Jump Hosts and Proxy Commands
 ```python
 # Jump host via an existing Connection instance
@@ -52,6 +50,8 @@ conn = Connection(
     proxy_command="ssh -W %h:%p bastion.example.com",
 )
 ```
+
+### SSH Agent Authentication
 
 If you have an SSH agent running with your keys loaded:
 ```python
