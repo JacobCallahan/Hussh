@@ -3,21 +3,13 @@
 
 [tox]
 requires = ["tox>=4.20"]
-env_list = ["py39", "py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "benchmarks-async", "build", "clean"]
+env_list = ["py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "benchmarks-async", "build", "clean"]
 [labels]
-test = ["py39", "py310", "py311", "py312", "py313", "py314"]
-all = ["py39", "py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "benchmarks-async"]
+test = ["py310", "py311", "py312", "py313", "py314"]
+all = ["py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "benchmarks-async"]
 
 
 # Test Environments
-[env.py39]
-description = "Run tests with Python 3.9"
-installer = "uv"
-deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
-pass_env = ["CI"]
-
-commands = [["pytest", "-v", "tests/", "{posargs}"]]
-
 [env.py310]
 description = "Run tests with Python 3.10"
 installer = "uv"
