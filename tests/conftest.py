@@ -101,6 +101,7 @@ def run_test_server(ensure_test_server_image):
             detach=True,
             ports={"22/tcp": 8022},
             name="hussh-test-server",
+            network_mode="bridge",
         )
         managed = True
         time.sleep(5)  # give the server time to start
@@ -115,19 +116,29 @@ def run_test_server(ensure_test_server_image):
 def run_second_server(ensure_test_server_image):
     """Run a test server in a Docker container."""
     client = docker.from_env()
+    needs_startup_wait = False
     try:  # check to see if the container is already running
         container = client.containers.get("hussh-test-server2")
+        if container.status != "running":
+            container.start()
+            needs_startup_wait = True
+        managed = False
     except docker.errors.NotFound:  # if not, start it
         container = client.containers.run(
             TEST_SERVER_IMAGE,
             detach=True,
             ports={"22/tcp": 8023},
             name="hussh-test-server2",
+            network_mode="bridge",
         )
+        managed = True
+        needs_startup_wait = True
+    if needs_startup_wait:
         time.sleep(5)  # give the server time to start
     yield container
-    container.stop()
-    container.remove()
+    if managed:
+        container.stop()
+        container.remove()
     client.close()
 
 
@@ -173,6 +184,7 @@ def run_test_servers(ensure_test_server_image, num_servers):  # noqa: PLR0912
     containers = []
     server_info = []
     managed_indices = []
+    needs_startup_wait = False
 
     for i in range(num_servers):
         port = BASE_PORT + i
@@ -189,6 +201,7 @@ def run_test_servers(ensure_test_server_image, num_servers):  # noqa: PLR0912
             container = client.containers.get(container_name)
             if container.status != "running":
                 container.start()
+                needs_startup_wait = True
             containers.append(container)
         except docker.errors.NotFound:
             container = client.containers.run(
@@ -196,14 +209,16 @@ def run_test_servers(ensure_test_server_image, num_servers):  # noqa: PLR0912
                 detach=True,
                 ports={"22/tcp": port},
                 name=container_name,
+                network_mode="bridge",
             )
             containers.append(container)
             managed_indices.append(i)
+            needs_startup_wait = True
 
         server_info.append((hostname, port))
 
     # Give servers time to start
-    if managed_indices:
+    if needs_startup_wait:
         time.sleep(5)
 
     yield server_info
