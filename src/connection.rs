@@ -58,6 +58,7 @@
 //! ```
 //!
 //! Note: The `read` method sends an EOF to the shell, so you won't be able to send more commands after calling `read`. If you want to send more commands, you would need to create a new `InteractiveShell` instance.
+use crate::recovery::{self, HusshConnectionError, RetryPolicy};
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use ssh2::{Channel, Session};
@@ -77,22 +78,88 @@ create_exception!(
     pyo3::exceptions::PyException
 );
 
+struct ProxyAttempt(Option<Child>);
+impl Drop for ProxyAttempt {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn transport_error(e: &ssh2::Error) -> bool {
+    matches!(
+        e.code(),
+        ssh2::ErrorCode::Session(-1 | -7 | -13 | -43 | -45) | ssh2::ErrorCode::SFTP(6 | 7)
+    )
+}
+fn ssh_error(e: ssh2::Error) -> PyErr {
+    if matches!(e.code(), ssh2::ErrorCode::Session(-9 | -30 | -37)) {
+        PyTimeoutError::new_err(e.to_string())
+    } else if transport_error(&e) {
+        HusshConnectionError::new_err(e.to_string())
+    } else {
+        PyIOError::new_err(e.to_string())
+    }
+}
+fn retryable(e: &PyErr) -> bool {
+    Python::attach(|py| {
+        e.is_instance_of::<HusshConnectionError>(py) || e.is_instance_of::<PyTimeoutError>(py)
+    })
+}
+fn auth_error(e: ssh2::Error) -> PyErr {
+    if transport_error(&e) || matches!(e.code(), ssh2::ErrorCode::Session(-9 | -30 | -37)) {
+        ssh_error(e)
+    } else {
+        AuthenticationError::new_err(e.to_string())
+    }
+}
+fn command_io_error(e: std::io::Error) -> PyErr {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+            PyTimeoutError::new_err(e.to_string())
+        }
+        std::io::ErrorKind::InvalidData
+        | std::io::ErrorKind::InvalidInput
+        | std::io::ErrorKind::Unsupported => PyIOError::new_err(e.to_string()),
+        // ssh2 erases transport error codes when converting them to io::ErrorKind::Other.
+        _ => recovery::incomplete(e),
+    }
+}
+
 fn read_from_channel(channel: &mut Channel) -> Result<SSHResult, PyErr> {
     let mut stdout = String::new();
     channel
         .read_to_string(&mut stdout)
-        .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("Timeout reading stdout: {}", e)))?;
+        .map_err(command_io_error)?;
     let mut stderr = String::new();
     channel
         .stderr()
         .read_to_string(&mut stderr)
-        .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("Timeout reading stderr: {}", e)))?;
+        .map_err(command_io_error)?;
     channel.wait_close().map_err(|e| {
-        PyErr::new::<PyTimeoutError, _>(format!("Timeout waiting for channel to close: {}", e))
+        if transport_error(&e) {
+            recovery::incomplete(e)
+        } else {
+            ssh_error(e)
+        }
     })?;
-    let status = channel.exit_status().map_err(|e| {
-        PyErr::new::<PyTimeoutError, _>(format!("Timeout getting exit status: {}", e))
+    let mut status = channel.exit_status().map_err(|e| {
+        if transport_error(&e) {
+            recovery::incomplete(e)
+        } else {
+            ssh_error(e)
+        }
     })?;
+    if channel
+        .exit_signal()
+        .map_err(ssh_error)?
+        .exit_signal
+        .is_some()
+    {
+        status = -1;
+    }
     Ok(SSHResult {
         stdout,
         stderr,
@@ -369,6 +436,14 @@ impl SSHResult {
 #[pyclass]
 pub struct Connection {
     session: Session,
+    closed: bool,
+    disconnected: bool,
+    #[pyo3(get)]
+    pub(crate) auto_reconnect: bool,
+    #[pyo3(get)]
+    pub(crate) max_retries: i64,
+    #[pyo3(get)]
+    pub(crate) retry_interval: f64,
     #[pyo3(get)]
     host: String,
     #[pyo3(get)]
@@ -389,12 +464,226 @@ pub struct Connection {
 
 // Non-public methods for the Connection class
 impl Connection {
-    // Emulate a python-like sftp property
-    fn sftp(&mut self) -> &ssh2::Sftp {
-        if self.sftp_conn.is_none() {
-            self.sftp_conn = Some(self.session.sftp().unwrap());
+    fn establish(&self) -> PyResult<(Session, Option<Child>)> {
+        let host = self.host.as_str();
+        let port = self.port;
+        let mut session = Session::new().map_err(ssh_error)?;
+        let mut proxy_process = ProxyAttempt(None);
+        let timeout = self.timeout;
+        session.set_timeout(timeout);
+        if let Some(command) = self.proxy_command.as_deref() {
+            let rendered = render_proxy_command(command, host, port);
+            let (proxy_stream, child) = create_proxy_stream(&rendered)?;
+            proxy_process.0 = Some(child);
+            session.set_tcp_stream(proxy_stream);
+        } else {
+            let conn_str = format!("{}:{}", host, port);
+            let tcp_conn = TcpStream::connect(conn_str)
+                .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
+            session.set_tcp_stream(tcp_conn);
         }
-        self.sftp_conn.as_ref().unwrap()
+
+        session
+            .handshake()
+            .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
+        let username = self.username.as_str();
+        let password = self.password.as_str();
+        let private_key = self.private_key.as_str();
+
+        if !private_key.is_empty() {
+            let private_key = shellexpand::tilde(private_key).into_owned();
+            if !password.is_empty() {
+                session
+                    .userauth_pubkey_file(username, None, Path::new(&private_key), Some(password))
+                    .map_err(auth_error)?;
+            } else {
+                session
+                    .userauth_pubkey_file(username, None, Path::new(&private_key), None)
+                    .map_err(auth_error)?;
+            }
+        } else if !password.is_empty() {
+            session
+                .userauth_password(username, password)
+                .map_err(auth_error)?;
+        } else if let Err(error) = session.userauth_agent(username) {
+            let error = auth_error(error);
+            if retryable(&error) {
+                return Err(error);
+            }
+            let default_keys = [
+                "~/.ssh/id_rsa",
+                "~/.ssh/id_ed25519",
+                "~/.ssh/id_ecdsa",
+                "~/.ssh/id_dsa",
+            ];
+
+            let mut auth_success = false;
+            for key_path in &default_keys {
+                let expanded_key_path = shellexpand::tilde(key_path).into_owned();
+                if Path::new(&expanded_key_path).exists() {
+                    match session.userauth_pubkey_file(
+                        username,
+                        None,
+                        Path::new(&expanded_key_path),
+                        None,
+                    ) {
+                        Ok(()) => {
+                            auth_success = true;
+                            break;
+                        }
+                        Err(error) => {
+                            let error = auth_error(error);
+                            if retryable(&error) {
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !auth_success {
+                return Err(PyErr::new::<AuthenticationError, _>(
+                    "Failed to authenticate with ssh-agent and default SSH keys",
+                ));
+            }
+        }
+
+        Ok((session, proxy_process.0.take()))
+    }
+
+    fn sftp(&self) -> &ssh2::Sftp {
+        self.sftp_conn
+            .as_ref()
+            .expect("SFTP prepared before file access")
+    }
+
+    fn prepare_sftp(&mut self) -> PyResult<()> {
+        if let Some(sftp) = self.prepare(|connection| {
+            if let Some(sftp) = connection.sftp_conn.as_ref() {
+                match sftp.realpath(Path::new(".")) {
+                    Ok(_) => {}
+                    // Any ordinary SFTP status response confirms the session is alive.
+                    Err(error)
+                        if matches!(error.code(), ssh2::ErrorCode::SFTP(_))
+                            && !transport_error(&error) => {}
+                    Err(error) => return Err(error),
+                }
+                Ok(None)
+            } else {
+                connection
+                    .session
+                    .sftp()
+                    .map(Some)
+                    .map_err(|error| connection.preparation_error(error))
+            }
+        })? {
+            self.sftp_conn = Some(sftp);
+        }
+        Ok(())
+    }
+
+    fn prepare_channel(&mut self, timeout: Option<u32>) -> PyResult<Channel> {
+        self.prepare(|connection| {
+            let session = &connection.session;
+            let original_timeout = session.timeout();
+            if let Some(timeout) = timeout {
+                session.set_timeout(timeout);
+            }
+            let result = session
+                .channel_session()
+                .map_err(|error| connection.preparation_error(error));
+            session.set_timeout(original_timeout);
+            result
+        })
+    }
+
+    fn preparation_error(&self, error: ssh2::Error) -> ssh2::Error {
+        // libssh2 can mask a lost transport as a subsystem request failure.
+        if matches!(error.code(), ssh2::ErrorCode::Session(-21)) {
+            if let Err(probe) = self.session.channel_session() {
+                if transport_error(&probe) {
+                    return probe;
+                }
+            }
+        }
+        error
+    }
+
+    fn prepare<T>(&mut self, setup: impl Fn(&Self) -> Result<T, ssh2::Error>) -> PyResult<T> {
+        if self.closed {
+            return Err(HusshConnectionError::new_err(
+                "Connection explicitly closed; use reconnect()",
+            ));
+        }
+        let mut cause = if self.disconnected {
+            HusshConnectionError::new_err("Disconnected")
+        } else {
+            match setup(self) {
+                Ok(value) => return Ok(value),
+                Err(e) if transport_error(&e) => ssh_error(e),
+                Err(e) => return Err(ssh_error(e)),
+            }
+        };
+        self.disconnected = true;
+        self.sftp_conn = None;
+        let retries = if self.auto_reconnect {
+            self.max_retries
+        } else {
+            0
+        };
+        let policy = RetryPolicy::new(retries, self.retry_interval);
+        for attempt in 0..retries {
+            Python::attach(|py| py.detach(|| std::thread::sleep(policy.delay(attempt))));
+            match self.install().and_then(|()| setup(self).map_err(ssh_error)) {
+                Ok(value) => return Ok(value),
+                Err(e) if retryable(&e) => cause = e,
+                Err(e) => return Err(e),
+            }
+            self.disconnected = true;
+        }
+        Err(recovery::exhausted(retries, cause))
+    }
+
+    fn install(&mut self) -> PyResult<()> {
+        self.disconnected = true;
+        self.sftp_conn = None;
+        if let Some(mut child) = self.proxy_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let (session, process) = Python::attach(|py| py.detach(|| self.establish()))?;
+        self.session = session;
+        self.proxy_process = process;
+        self.disconnected = false;
+        self.closed = false;
+        Ok(())
+    }
+
+    fn replace_session(&mut self, policy: RetryPolicy) -> PyResult<()> {
+        self.sftp_conn = None;
+        if let Some(mut child) = self.proxy_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let attempts = policy.retries + 1;
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                let delay = policy.delay(attempt - 1);
+                Python::attach(|py| py.detach(|| std::thread::sleep(delay)));
+            }
+            match self.install() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if !retryable(&e) {
+                        return Err(e);
+                    }
+                    if attempt + 1 == attempts {
+                        return Err(recovery::exhausted(attempts, e));
+                    }
+                }
+            }
+        }
+        unreachable!("explicit recovery always attempts once")
     }
 
     // Public getters for use by multi_conn module
@@ -436,7 +725,7 @@ impl Drop for Connection {
 #[pymethods]
 impl Connection {
     #[new]
-    #[pyo3(signature = (host, port=22, username="root", password=None, private_key=None, proxy_jump=None, proxy_command=None, timeout=0))]
+    #[pyo3(signature = (host, port=22, username="root", password=None, private_key=None, proxy_jump=None, proxy_command=None, timeout=0, *, auto_reconnect=true, max_retries=3, retry_interval=1.5))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -448,6 +737,9 @@ impl Connection {
         proxy_jump: Option<Bound<'_, PyAny>>,
         proxy_command: Option<&str>,
         timeout: Option<u32>,
+        auto_reconnect: bool,
+        max_retries: i64,
+        retry_interval: f64,
     ) -> PyResult<Connection> {
         let port = port.unwrap_or(22);
 
@@ -472,119 +764,92 @@ impl Connection {
             proxy_command.map(ToString::to_string)
         };
 
-        let mut session = Session::new().unwrap();
-        let mut proxy_process = None;
-        let timeout = timeout.unwrap_or(0);
-        session.set_timeout(timeout);
-        if let Some(command) = effective_proxy_command.as_deref() {
-            let rendered = render_proxy_command(command, host, port);
-            let (proxy_stream, child) = create_proxy_stream(&rendered)?;
-            proxy_process = Some(child);
-            session.set_tcp_stream(proxy_stream);
-        } else {
-            let conn_str = format!("{}:{}", host, port);
-            let tcp_conn = TcpStream::connect(conn_str)
-                .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
-            session.set_tcp_stream(tcp_conn);
-        }
-
-        session
-            .handshake()
-            .map_err(|e| PyErr::new::<PyTimeoutError, _>(format!("{}", e)))?;
-        let username = username.unwrap_or("root");
-        let password = password.unwrap_or("");
-        let private_key = private_key.unwrap_or("");
-
-        if !private_key.is_empty() {
-            let private_key = shellexpand::tilde(private_key).into_owned();
-            if !password.is_empty() {
-                session
-                    .userauth_pubkey_file(username, None, Path::new(&private_key), Some(password))
-                    .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
-            } else {
-                session
-                    .userauth_pubkey_file(username, None, Path::new(&private_key), None)
-                    .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
-            }
-        } else if !password.is_empty() {
-            session
-                .userauth_password(username, password)
-                .map_err(|e| PyErr::new::<AuthenticationError, _>(format!("{}", e)))?;
-        } else if session.userauth_agent(username).is_err() {
-            let default_keys = [
-                "~/.ssh/id_rsa",
-                "~/.ssh/id_ed25519",
-                "~/.ssh/id_ecdsa",
-                "~/.ssh/id_dsa",
-            ];
-
-            let mut auth_success = false;
-            for key_path in &default_keys {
-                let expanded_key_path = shellexpand::tilde(key_path).into_owned();
-                if Path::new(&expanded_key_path).exists()
-                    && session
-                        .userauth_pubkey_file(username, None, Path::new(&expanded_key_path), None)
-                        .is_ok()
-                {
-                    auth_success = true;
-                    break;
-                }
-            }
-
-            if !auth_success {
-                return Err(PyErr::new::<AuthenticationError, _>(
-                    "Failed to authenticate with ssh-agent and default SSH keys",
-                ));
-            }
-        }
-
-        Ok(Connection {
-            session,
+        recovery::validate(max_retries, retry_interval)?;
+        let mut conn = Connection {
+            session: Session::new().map_err(ssh_error)?,
+            closed: false,
+            disconnected: false,
+            auto_reconnect,
+            max_retries,
+            retry_interval,
             port,
             host: host.to_string(),
-            username: username.to_string(),
-            password: password.to_string(),
-            private_key: private_key.to_string(),
-            timeout,
+            username: username.unwrap_or("root").to_string(),
+            password: password.unwrap_or("").to_string(),
+            private_key: private_key.unwrap_or("").to_string(),
+            timeout: timeout.unwrap_or(0),
             proxy_command: effective_proxy_command,
-            proxy_process,
+            proxy_process: None,
             sftp_conn: None,
-        })
+        };
+        let (session, process) = py.detach(|| conn.establish())?;
+        conn.session = session;
+        conn.proxy_process = process;
+        Ok(conn)
     }
 
+    #[pyo3(signature = (*, max_retries=None, retry_interval=None, max_interval=30.0))]
+    fn reconnect(
+        &mut self,
+        max_retries: Option<i64>,
+        retry_interval: Option<Bound<'_, PyAny>>,
+        max_interval: f64,
+    ) -> PyResult<()> {
+        let policy = RetryPolicy::overrides(
+            max_retries.unwrap_or(self.max_retries),
+            self.retry_interval,
+            retry_interval,
+            max_interval,
+        )?;
+        self.replace_session(policy)
+    }
     /// Executes a command over the SSH connection and returns the result.
     /// If `timeout` is provided, it temporarily updates the session timeout for the duration of the command execution.
     #[pyo3(signature = (command, timeout=None))]
-    fn execute(&self, command: String, timeout: Option<u32>) -> PyResult<SSHResult> {
-        let original_timeout = self.session.timeout();
-        if let Some(t) = timeout {
-            self.session.set_timeout(t);
-        }
-
-        let mut channel = self.session.channel_session().map_err(|e| {
-            PyErr::new::<PyTimeoutError, _>(format!(
-                "Timed out establishing channel session.\n{}",
-                e
-            ))
-        })?;
-        // exec is non-blocking, so we don't check for a timeout here, but in read_from_channel
-        channel.exec(&command).unwrap();
-        let result = match read_from_channel(&mut channel) {
-            Ok(res) => res,
-            Err(e) => {
-                self.session.set_timeout(original_timeout);
-                return Err(e);
+    fn execute(
+        &mut self,
+        py: Python<'_>,
+        command: String,
+        timeout: Option<u32>,
+    ) -> PyResult<SSHResult> {
+        py.detach(|| {
+            let mut channel = self.prepare_channel(timeout)?;
+            let original_timeout = self.session.timeout();
+            if let Some(t) = timeout {
+                self.session.set_timeout(t);
             }
-        };
-        self.session.set_timeout(original_timeout);
-        Ok(result)
+            let result = (|| {
+                // Submission is the no-replay boundary, even if exec itself fails.
+                channel.exec(&command).map_err(|e| {
+                    let e = self.preparation_error(e);
+                    if transport_error(&e) {
+                        recovery::incomplete(e)
+                    } else {
+                        ssh_error(e)
+                    }
+                })?;
+                read_from_channel(&mut channel)
+            })();
+            self.session.set_timeout(original_timeout);
+            if Python::attach(|py| {
+                result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| e.is_instance_of::<recovery::HusshIncompleteCommandError>(py))
+            }) {
+                self.disconnected = true;
+                self.sftp_conn = None;
+            }
+            result
+        })
     }
 
     /// Reads a file over SCP and returns the contents.
     /// If `local_path` is provided, the file is saved to the local system.
     /// Otherwise, the contents of the file are returned as a string.
     #[pyo3(signature = (remote_path, local_path=None))]
-    fn scp_read(&self, remote_path: String, local_path: Option<String>) -> PyResult<String> {
+    fn scp_read(&mut self, remote_path: String, local_path: Option<String>) -> PyResult<String> {
+        let _ = self.prepare_channel(None)?;
         let (mut remote_file, stat) = self
             .session
             .scp_recv(Path::new(&remote_path))
@@ -618,7 +883,8 @@ impl Connection {
     }
 
     /// Writes a file over SCP.
-    fn scp_write(&self, local_path: String, remote_path: String) -> PyResult<()> {
+    fn scp_write(&mut self, local_path: String, remote_path: String) -> PyResult<()> {
+        let _ = self.prepare_channel(None)?;
         // if remote_path is a directory, append the local file name to the remote path
         let remote_path = if remote_path.ends_with('/') {
             format!(
@@ -626,16 +892,17 @@ impl Connection {
                 remote_path,
                 Path::new(&local_path)
                     .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| PyIOError::new_err("local_path must name a file"))?
             )
         } else {
             remote_path
         };
         let mut local_file = std::fs::File::open(&local_path)
             .map_err(|e| PyErr::new::<PyIOError, _>(format!("Local file open error: {}", e)))?;
-        let metadata = local_file.metadata().unwrap();
+        let metadata = local_file
+            .metadata()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         // TODO: better handle permissions. Perhaps from metadata.permissions()?
         let mut remote_file = self
             .session
@@ -656,16 +923,27 @@ impl Connection {
                     PyErr::new::<PyIOError, _>(format!("Remote file write error: {}", e))
                 })?;
         }
-        remote_file.flush().unwrap();
-        remote_file.send_eof().unwrap();
-        remote_file.wait_eof().unwrap();
-        remote_file.close().unwrap();
-        remote_file.wait_close().unwrap();
+        remote_file
+            .flush()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .send_eof()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .wait_eof()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .close()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .wait_close()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         Ok(())
     }
 
     /// Writes data over SCP.
-    fn scp_write_data(&self, data: String, remote_path: String) -> PyResult<()> {
+    fn scp_write_data(&mut self, data: String, remote_path: String) -> PyResult<()> {
+        let _ = self.prepare_channel(None)?;
         let mut remote_file = self
             .session
             .scp_send(Path::new(&remote_path), 0o644, data.len() as u64, None)
@@ -673,10 +951,18 @@ impl Connection {
         remote_file
             .write_all(data.as_bytes())
             .map_err(|e| PyErr::new::<PyIOError, _>(format!("Data write error: {}", e)))?;
-        remote_file.send_eof().unwrap();
-        remote_file.wait_eof().unwrap();
-        remote_file.close().unwrap();
-        remote_file.wait_close().unwrap();
+        remote_file
+            .send_eof()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .wait_eof()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .close()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        remote_file
+            .wait_close()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -685,6 +971,7 @@ impl Connection {
     /// Otherwise, the contents of the file are returned as a string.
     #[pyo3(signature = (remote_path, local_path=None))]
     fn sftp_read(&mut self, remote_path: String, local_path: Option<String>) -> PyResult<String> {
+        self.prepare_sftp()?;
         let mut remote_file = BufReader::new(
             self.sftp()
                 .open(Path::new(&remote_path))
@@ -725,10 +1012,13 @@ impl Connection {
     /// Writes a file over SFTP. If `remote_path` is not provided, the local file is written to the same path on the remote system.
     #[pyo3(signature = (local_path, remote_path=None))]
     fn sftp_write(&mut self, local_path: String, remote_path: Option<String>) -> PyResult<()> {
+        self.prepare_sftp()?;
         let mut local_file = std::fs::File::open(&local_path)
             .map_err(|e| PyErr::new::<PyIOError, _>(format!("Local file open error: {}", e)))?;
         let remote_path = remote_path.unwrap_or_else(|| local_path.clone());
-        let metadata = local_file.metadata().unwrap();
+        let metadata = local_file
+            .metadata()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         let mut remote_file = self.sftp().create(Path::new(&remote_path)).map_err(|e| {
             PyErr::new::<PyIOError, _>(format!("Remote file creation error: {}", e))
         })?;
@@ -747,12 +1037,15 @@ impl Connection {
                     PyErr::new::<PyIOError, _>(format!("Remote file write error: {}", e))
                 })?;
         }
-        remote_file.close().unwrap();
+        remote_file
+            .close()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         Ok(())
     }
 
     /// Writes data over SFTP.
     fn sftp_write_data(&mut self, data: String, remote_path: String) -> PyResult<()> {
+        self.prepare_sftp()?;
         let mut remote_file = self.sftp().create(Path::new(&remote_path)).map_err(|e| {
             PyErr::new::<PyIOError, _>(format!("Remote file creation error: {}", e))
         })?;
@@ -777,6 +1070,7 @@ impl Connection {
         preserve_permissions: bool,
         fail_fast: bool,
     ) -> PyResult<(Vec<String>, Vec<String>)> {
+        self.prepare_sftp()?;
         let mut transferred: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
@@ -970,6 +1264,7 @@ impl Connection {
         preserve_permissions: bool,
         fail_fast: bool,
     ) -> PyResult<(Vec<String>, Vec<String>)> {
+        self.prepare_sftp()?;
         let mut transferred: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
@@ -1112,15 +1407,15 @@ impl Connection {
     // Copy a file from this connection to another connection
     #[pyo3(signature = (source_path, dest_conn, dest_path=None))]
     fn remote_copy(
-        &self,
+        &mut self,
         source_path: String,
         dest_conn: &mut Connection,
         dest_path: Option<String>,
     ) -> PyResult<()> {
+        self.prepare_sftp()?;
+        dest_conn.prepare_sftp()?;
         let mut remote_file = BufReader::new(
-            self.session
-                .sftp()
-                .map_err(|e| PyErr::new::<PyIOError, _>(format!("SFTP error: {}", e)))?
+            self.sftp()
                 .open(Path::new(&source_path))
                 .map_err(|e| PyErr::new::<PyIOError, _>(format!("Remote open error: {}", e)))?,
         );
@@ -1153,12 +1448,14 @@ impl Connection {
     ///     time.sleep(5)  # wait or perform other operations
     /// print(tailer.contents)
     /// ```
-    fn tail(&self, remote_file: String) -> FileTailer {
+    fn tail(&mut self, remote_file: String) -> PyResult<FileTailer> {
         FileTailer::new(self, remote_file, None)
     }
 
     /// Close the connection's session
     fn close(&mut self) -> PyResult<()> {
+        self.closed = true;
+        self.sftp_conn = None;
         let _ = self.session.disconnect(None, "Bye from Hussh", None);
         if let Some(child) = self.proxy_process.as_mut() {
             let _ = child.kill();
@@ -1203,14 +1500,16 @@ impl Connection {
     /// print(shell.result.stdout)
     /// ```
     #[pyo3(signature = (pty=None))]
-    fn shell(&self, pty: Option<bool>) -> PyResult<InteractiveShell> {
-        let mut channel = self.session.channel_session().unwrap();
+    fn shell(&mut self, pty: Option<bool>) -> PyResult<InteractiveShell> {
+        let mut channel = self.prepare_channel(None)?;
         if let Some(pty) = pty {
             if pty {
-                channel.request_pty("xterm", None, None).unwrap();
+                channel
+                    .request_pty("xterm", None, None)
+                    .map_err(ssh_error)?;
             }
         }
-        channel.shell().unwrap();
+        channel.shell().map_err(ssh_error)?;
         Ok(InteractiveShell {
             channel: ChannelWrapper { channel },
             pty: pty.unwrap_or(false),
@@ -1278,13 +1577,16 @@ impl InteractiveShell {
         } else {
             data
         };
-        self.channel.channel.write_all(data.as_bytes()).unwrap();
+        self.channel
+            .channel
+            .write_all(data.as_bytes())
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         Ok(())
     }
 
     /// Closes the shell.
     fn close(&mut self) -> PyResult<()> {
-        self.channel.channel.close().unwrap();
+        self.channel.channel.close().map_err(ssh_error)?;
         Ok(())
     }
 
@@ -1364,14 +1666,24 @@ pub struct FileTailer {
 impl FileTailer {
     #[new]
     #[pyo3(signature = (conn, remote_file, init_pos=None))]
-    fn new(conn: &Connection, remote_file: String, init_pos: Option<u64>) -> FileTailer {
-        FileTailer {
-            sftp_conn: conn.session.sftp().unwrap(),
+    fn new(
+        conn: &mut Connection,
+        remote_file: String,
+        init_pos: Option<u64>,
+    ) -> PyResult<FileTailer> {
+        let sftp_conn = conn.prepare(|connection| {
+            connection
+                .session
+                .sftp()
+                .map_err(|error| connection.preparation_error(error))
+        })?;
+        Ok(FileTailer {
+            sftp_conn,
             remote_file,
             init_pos,
             last_pos: 0,
             contents: None,
-        }
+        })
     }
 
     // Determine the current end of the remote file
@@ -1389,20 +1701,24 @@ impl FileTailer {
 
     // Read the contents of the remote file from a given position
     #[pyo3(signature = (from_pos=None))]
-    fn read(&mut self, from_pos: Option<u64>) -> String {
+    fn read(&mut self, from_pos: Option<u64>) -> PyResult<String> {
         let from_pos = from_pos.unwrap_or(self.last_pos);
         let mut remote_file = BufReader::new(
             self.sftp_conn
                 .open(Path::new(&self.remote_file))
-                .expect("Opening remote file failed"),
+                .map_err(ssh_error)?,
         );
         remote_file
             .seek(std::io::SeekFrom::Start(from_pos))
-            .unwrap();
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
         let mut contents = String::new();
-        remote_file.read_to_string(&mut contents).unwrap();
-        self.last_pos = remote_file.stream_position().unwrap();
-        contents
+        remote_file
+            .read_to_string(&mut contents)
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        self.last_pos = remote_file
+            .stream_position()
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        Ok(contents)
     }
 
     fn __enter__(mut slf: PyRefMut<Self>) -> PyResult<PyRefMut<Self>> {
@@ -1417,7 +1733,7 @@ impl FileTailer {
         _exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        self.contents = Some(self.read(self.init_pos));
+        self.contents = Some(self.read(self.init_pos)?);
         Ok(())
     }
 }

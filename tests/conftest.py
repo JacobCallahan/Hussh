@@ -21,12 +21,14 @@ GitHub Actions automatically configures these hostnames in the CI workflow.
 
 import os
 from pathlib import Path, PurePath
+import socket
 import subprocess
 import time
 
 import docker
 import pexpect
 import pytest
+from recovery_proxy import FaultProxy
 
 TESTDIR = PurePath(__file__).parent
 TEST_SERVER_IMAGE = "ghcr.io/jacobcallahan/hussh/hussh-test-server:latest"
@@ -65,6 +67,17 @@ def container_internal_address(container, port=22):
     networks = container.attrs["NetworkSettings"]["Networks"]
     ip_address = next(iter(networks.values()))["IPAddress"]
     return ip_address, port
+
+
+@pytest.fixture
+def fault_proxy(run_test_server):
+    if os.name == "nt":
+        pytest.skip("The fault relay requires selectable Unix multiprocessing pipes")
+    proxy = FaultProxy()
+    try:
+        yield proxy
+    finally:
+        proxy.close()
 
 
 @pytest.fixture(scope="session")
@@ -144,8 +157,6 @@ def run_second_server(ensure_test_server_image):
 
 def _check_hostname_resolution(hostname):
     """Check if a hostname resolves (to any address)."""
-    import socket
-
     try:
         socket.gethostbyname(hostname)
         return True

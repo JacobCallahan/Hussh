@@ -43,6 +43,14 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+// Release Python while Tokio workers perform recovery and construct Python errors.
+fn run<F: std::future::Future + Send>(future: F) -> F::Output
+where
+    F::Output: Send,
+{
+    Python::attach(|py| py.detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(future)))
+}
+
 // Create the PartialFailureException
 pyo3::create_exception!(
     multi_conn,
@@ -311,7 +319,7 @@ impl MultiConnection {
 
         for conn in connections {
             let port = conn.get_port() as u16;
-            let async_conn = AsyncConnection::create(
+            let mut async_conn = AsyncConnection::create(
                 conn.get_host().to_string(),
                 Some(conn.get_username().to_string()),
                 if conn.get_password().is_empty() {
@@ -329,6 +337,9 @@ impl MultiConnection {
                 0,                    // keepalive_interval
                 timeout.unwrap_or(0), // Use explicit timeout or 0 for no timeout
             );
+            async_conn.auto_reconnect = conn.auto_reconnect;
+            async_conn.max_retries = conn.max_retries;
+            async_conn.retry_interval = conn.retry_interval;
             hosts.push(conn.get_host().to_string());
             async_conns.push(async_conn);
         }
@@ -395,7 +406,7 @@ impl MultiConnection {
             .map(|(h, c)| (h.clone(), c.clone()))
             .collect();
 
-        let results = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        let results = run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -507,7 +518,7 @@ impl MultiConnection {
             .map(|(h, c)| (h.clone(), c.clone()))
             .collect();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -522,25 +533,7 @@ impl MultiConnection {
                 set.spawn(async move {
                     let _permit = permit;
 
-                    let result = if let Some(timeout_secs) = timeout {
-                        tokio::time::timeout(
-                            Duration::from_secs(timeout_secs),
-                            conn.execute_async(cmd, None),
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            Ok(SSHResult {
-                                stdout: String::new(),
-                                stderr: format!(
-                                    "Command execution timed out after {} seconds",
-                                    timeout_secs
-                                ),
-                                status: -1,
-                            })
-                        })
-                    } else {
-                        conn.execute_async(cmd, None).await
-                    };
+                    let result = conn.execute_async(cmd, timeout).await;
 
                     (host, result)
                 });
@@ -603,7 +596,7 @@ impl MultiConnection {
             })
             .collect();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -617,25 +610,7 @@ impl MultiConnection {
                 set.spawn(async move {
                     let _permit = permit;
 
-                    let result = if let Some(timeout_secs) = timeout {
-                        tokio::time::timeout(
-                            Duration::from_secs(timeout_secs),
-                            conn.execute_async(cmd, None),
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            Ok(SSHResult {
-                                stdout: String::new(),
-                                stderr: format!(
-                                    "Operation timed out after {} seconds",
-                                    timeout_secs
-                                ),
-                                status: -1,
-                            })
-                        })
-                    } else {
-                        conn.execute_async(cmd, None).await
-                    };
+                    let result = conn.execute_async(cmd, timeout).await;
 
                     (host, result)
                 });
@@ -683,7 +658,7 @@ impl MultiConnection {
             .map(|(h, c)| (h.clone(), c.clone()))
             .collect();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -752,7 +727,7 @@ impl MultiConnection {
             .map(|(h, c)| (h.clone(), c.clone()))
             .collect();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -819,7 +794,7 @@ impl MultiConnection {
             .map(|(h, c)| (h.clone(), c.clone()))
             .collect();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -917,7 +892,7 @@ impl MultiConnection {
 
     /// Close all connections
     fn close(&self) -> PyResult<()> {
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             for conn in &self.connections {
                 conn.close_async().await;
             }
@@ -985,7 +960,7 @@ impl MultiFileTailer {
 
         let tailers: Vec<(String, AsyncFileTailer)> = self.tailers.clone();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -1030,7 +1005,7 @@ impl MultiFileTailer {
         let batch_size = slf.batch_size;
         let tailers: Vec<(String, AsyncFileTailer)> = slf.tailers.clone();
 
-        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 
@@ -1083,7 +1058,7 @@ impl MultiFileTailer {
         let batch_size = self.batch_size;
         let tailers: Vec<(String, AsyncFileTailer)> = self.tailers.clone();
 
-        let contents = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+        let contents = run(async {
             let mut set = JoinSet::new();
             let semaphore = Arc::new(Semaphore::new(batch_size));
 

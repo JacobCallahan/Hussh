@@ -13,44 +13,50 @@ all = ["py310", "py311", "py312", "py313", "py314", "lint", "benchmarks-sync", "
 [env.py310]
 description = "Run tests with Python 3.10"
 installer = "uv"
+extras = ["test"]
 deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
-pass_env = ["CI"]
+pass_env = ["CI", "OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
 
-commands = [["pytest", "-v", "tests/", "{posargs}"]]
+commands = [["pytest", "-v", "tests/", { replace = "posargs", extend = true }]]
 
 [env.py311]
 description = "Run tests with Python 3.11"
 installer = "uv"
+extras = ["test"]
 deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
-pass_env = ["CI"]
+pass_env = ["CI", "OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
 
-commands = [["pytest", "-v", "tests/", "{posargs}"]]
+commands = [["pytest", "-v", "tests/", { replace = "posargs", extend = true }]]
 
 [env.py312]
 description = "Run tests with Python 3.12"
 installer = "uv"
+extras = ["test"]
 deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
-pass_env = ["CI"]
+pass_env = ["CI", "OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
 
-commands = [["pytest", "-v", "tests/", "{posargs}"]]
+commands = [["pytest", "-v", "tests/", { replace = "posargs", extend = true }]]
 
 [env.py313]
 description = "Run tests with Python 3.13"
 installer = "uv"
+extras = ["test"]
 deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
-pass_env = ["CI"]
+pass_env = ["CI", "OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
 
-commands = [["pytest", "-v", "tests/", "{posargs}"]]
+commands = [["pytest", "-v", "tests/", { replace = "posargs", extend = true }]]
 
 [env.py314]
 description = "Run tests with Python 3.14"
 installer = "uv"
+extras = ["test"]
 deps = ["pytest>=8", "pytest-asyncio", "pytest-randomly"]
-pass_env = ["CI"]
+pass_env = ["CI", "OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
 
-commands = [["pytest", "-v", "tests/", "{posargs}"]]
+commands = [["pytest", "-v", "tests/", { replace = "posargs", extend = true }]]
 
 [env.lint]
+pass_env = ["OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
 description = "Run linting and formatting checks"
 deps = ["pre-commit>=3.7"]
 skip_install = true
@@ -85,6 +91,8 @@ pass_env = ["CI"]
 commands = [["python", "benchmarks/run_benchmarks.py", "--run-async"]]
 
 [env.build]
+pass_env = ["OPENSSL_NO_VENDOR", "CARGO_TARGET_DIR"]
+deps = ["maturin", "patchelf; sys_platform == 'linux'"]
 description = "Build the project wheel"
 skip_install = true
 commands = [["maturin", "build"]]

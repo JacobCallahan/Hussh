@@ -6,10 +6,19 @@ mod asynchronous;
 mod connection;
 #[cfg(feature = "async")]
 mod multi_conn;
+mod recovery;
 
 /// A Python module implemented in Rust.
 #[pymodule]
 fn hussh(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(
+        "HusshConnectionError",
+        _py.get_type::<recovery::HusshConnectionError>(),
+    )?;
+    m.add(
+        "HusshIncompleteCommandError",
+        _py.get_type::<recovery::HusshIncompleteCommandError>(),
+    )?;
     m.add_class::<connection::Connection>()?; // Add the Connection class
     m.add_class::<connection::SSHResult>()?;
     m.add_class::<connection::InteractiveShell>()?;

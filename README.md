@@ -20,6 +20,7 @@ pip install hussh
 - [Synchronous Usage](#synchronous-usage)
 - [Asynchronous Usage](#asynchronous-usage)
 - [Concurrent Operations](#concurrent-operations-multiconnection)
+- [Development](#development)
 - [Documentation](#documentation)
 
 # QuickStart
@@ -31,6 +32,14 @@ conn = Connection(host="my.test.server", username="user", password="pass")
 result = conn.execute("ls")
 print(result.stdout)
 ```
+
+Connections recover brief network interruptions automatically before new actions
+(`auto_reconnect=True`, `max_retries=3`, `retry_interval=1.5` seconds).
+Choose `auto_reconnect=False` for immediate failure or your own retry policy.
+Commands are never replayed once submission starts; an interrupted command raises
+`HusshIncompleteCommandError` because execution may already have occurred.
+See [connection recovery](docs/synchronous.md#connection-recovery) for explicit
+`reconnect()`, failure latency, timeout behavior, and transfer limits.
 
 That's it! One import and class instantion is all you need to:
 - Execute commands
@@ -157,6 +166,23 @@ with mc:
 ```
 
 📚 **For complete documentation including `MultiResult` handling, SFTP operations, file tailing, error handling, and concurrency control, see [MultiConnection Usage](docs/multi-connection.md).**
+
+# Development
+
+On Fedora, with `make`, `uv`, and Rust/Cargo available, run:
+
+```bash
+make setup-dev
+source .venv/bin/activate
+```
+
+This uses `sudo dnf` to install GCC, Perl's core modules, OpenSSL development
+headers, and pkg-config. It creates `.venv` if needed and installs Hussh editably
+with the existing `dev` dependencies. Perl's core modules are needed to build
+vendored OpenSSL, including the `FindBin` module.
+
+After changing Rust code, rebuild with `maturin develop --uv` in the activated
+environment. Run tests through `tox`, for example `tox -e py314`.
 
 # Documentation
 

@@ -99,6 +99,7 @@
 //! ```
 
 use crate::connection::{SSHResult, MAX_BUFF_SIZE};
+use crate::recovery::{self, HusshConnectionError, RetryPolicy};
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyTypeError};
 use pyo3::prelude::*;
 use russh::client::{Config, Handle, Handler};
@@ -106,10 +107,69 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use russh_sftp::client::SftpSession;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+
+fn transport_error(e: &russh::Error) -> bool {
+    if let russh::Error::IO(error) = e {
+        return !matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::InvalidInput
+                | std::io::ErrorKind::InvalidData
+                | std::io::ErrorKind::Unsupported
+        );
+    }
+    matches!(
+        e,
+        russh::Error::Disconnect
+            | russh::Error::SendError
+            | russh::Error::HUP
+            | russh::Error::ConnectionTimeout
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout
+    )
+}
+fn retryable(e: &PyErr) -> bool {
+    Python::attach(|py| {
+        e.is_instance_of::<HusshConnectionError>(py) || e.is_instance_of::<PyTimeoutError>(py)
+    })
+}
+fn connect_error(e: russh::Error) -> PyErr {
+    if transport_error(&e) {
+        HusshConnectionError::new_err(e.to_string())
+    } else {
+        PyRuntimeError::new_err(e.to_string())
+    }
+}
+
+fn sftp_setup_error(
+    error: russh_sftp::client::error::Error,
+    session: &Handle<ClientHandler>,
+) -> PyErr {
+    use russh_sftp::client::error::Error;
+    let transport = match &error {
+        Error::IO(_) | Error::Timeout => true,
+        Error::UnexpectedBehavior(message) => {
+            message.starts_with("SendError:") || message.starts_with("RecvError:")
+        }
+        Error::Status(status) => matches!(
+            status.status_code,
+            russh_sftp::protocol::StatusCode::NoConnection
+                | russh_sftp::protocol::StatusCode::ConnectionLost
+        ),
+        _ => false,
+    };
+    if session.is_closed() || transport {
+        HusshConnectionError::new_err(format!("SFTP setup interrupted: {error}"))
+    } else {
+        PyRuntimeError::new_err(format!("Failed to initialize SFTP: {error}"))
+    }
+}
 
 /// Create a PrivateKeyWithHashAlg with the appropriate hash algorithm for the key type.
 /// For RSA keys, we use SHA-256 for modern server compatibility.
@@ -150,6 +210,7 @@ async fn try_default_keys(
                     .await
                 {
                     Ok(auth_result) if auth_result.success() => return Ok(true),
+                    Err(error) if transport_error(&error) => return Err(error),
                     // Authentication failed with this key, try next one
                     Ok(_) | Err(_) => continue,
                 }
@@ -277,6 +338,7 @@ async fn create_async_proxy_stream(
         .stdin(Stdio::from(std::os::fd::OwnedFd::from(stdin_side)))
         .stdout(Stdio::from(std::os::fd::OwnedFd::from(proxy_std)))
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to start proxy command: {}", e)))?;
 
@@ -431,6 +493,17 @@ pub struct AsyncConnection {
     username: Option<String>,
     password: Option<String>,
     key_path: Option<String>,
+    #[pyo3(get)]
+    pub(crate) auto_reconnect: bool,
+    #[pyo3(get)]
+    pub(crate) max_retries: i64,
+    #[pyo3(get)]
+    pub(crate) retry_interval: f64,
+    // 0: never connected; 1: eligible for recovery; 2: explicitly closed.
+    lifecycle: Arc<AtomicU8>,
+    close_generation: Arc<AtomicU64>,
+    close_notification: Arc<Notify>,
+    replacement: Arc<Mutex<()>>,
     // Use Arc<Mutex<>> to allow updating the session from the async block
     // Wrap Handle in Arc because it might not be Clone
     session: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
@@ -465,6 +538,11 @@ impl Drop for AsyncConnection {
     }
 }
 
+enum Prepared {
+    Channel(russh::Channel<russh::client::Msg>),
+    Sftp(Arc<SftpSession>),
+}
+
 // Private/internal async helper methods for AsyncConnection
 impl AsyncConnection {
     /// Get the host for this connection
@@ -477,80 +555,53 @@ impl AsyncConnection {
         self.port
     }
 
-    /// Lazily initializes and returns the SFTP session, caching it for reuse
-    async fn get_or_init_sftp(
-        session_arc: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
-        sftp_arc: Arc<Mutex<Option<Arc<SftpSession>>>>,
-    ) -> PyResult<Arc<SftpSession>> {
-        // Check if we already have an SFTP session
-        {
-            let sftp_guard = sftp_arc.lock().await;
-            if let Some(sftp) = sftp_guard.as_ref() {
-                return Ok(sftp.clone());
-            }
+    async fn until_closed<T>(
+        &self,
+        generation: u64,
+        work: impl std::future::Future<Output = PyResult<T>>,
+    ) -> PyResult<T> {
+        let closed = self.close_notification.notified();
+        tokio::pin!(closed);
+        // Register before checking the generation so a concurrent close cannot be missed.
+        closed.as_mut().enable();
+        if self.close_generation.load(Ordering::SeqCst) != generation {
+            return Err(HusshConnectionError::new_err(
+                "Connection closed during preparation",
+            ));
         }
-
-        // Need to create a new SFTP session
-        let session_guard = session_arc.lock().await;
-        let session = session_guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?
-            .clone();
-        drop(session_guard);
-
-        let channel = session
-            .channel_open_session()
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to open channel: {}", e)))?;
-
-        channel.request_subsystem(true, "sftp").await.map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to request SFTP subsystem: {}", e))
-        })?;
-
-        let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to create SFTP session: {}", e))
-        })?;
-
-        let sftp = Arc::new(sftp);
-
-        // Cache the SFTP session
-        {
-            let mut sftp_guard = sftp_arc.lock().await;
-            *sftp_guard = Some(sftp.clone());
+        tokio::select! {
+            biased;
+            _ = closed => Err(HusshConnectionError::new_err("Connection closed during preparation")),
+            result = work => result,
         }
-
-        Ok(sftp)
     }
 
-    /// Internal async connect implementation - used by MultiConnection
-    pub(crate) async fn connect_async(&self, timeout: Option<u64>) -> PyResult<()> {
+    async fn establish(
+        &self,
+        timeout: Option<u64>,
+    ) -> PyResult<(Arc<Handle<ClientHandler>>, Option<Child>)> {
         let config = self.config.clone();
         let host = self.host.clone();
         let port = self.port;
         let username = self.username.clone().unwrap_or_default();
         let password = self.password.clone();
         let key_path = self.key_path.clone();
-        let session_arc = self.session.clone();
         let proxy_command = self.proxy_command.clone();
-        let proxy_process_arc = self.proxy_process.clone();
         let timeout = timeout.unwrap_or(self.timeout);
-
         let run = async {
+            let mut process = None;
             let handler = ClientHandler {};
             let mut session = if let Some(command) = proxy_command.as_deref() {
                 let rendered = render_proxy_command(command, &host, port);
                 let (proxy_stream, child) = create_async_proxy_stream(&rendered).await?;
-                {
-                    let mut proxy_guard = proxy_process_arc.lock().await;
-                    *proxy_guard = Some(child);
-                }
+                process = Some(child);
                 russh::client::connect_stream(config, proxy_stream, handler)
                     .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?
+                    .map_err(connect_error)?
             } else {
                 russh::client::connect(config, (host.as_str(), port), handler)
                     .await
-                    .map_err(|e| PyRuntimeError::new_err(format!("Connection failed: {}", e)))?
+                    .map_err(connect_error)?
             };
 
             // Authentication
@@ -590,19 +641,12 @@ impl AsyncConnection {
                     ));
                 }
                 Err(e) => {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "Authentication failed: {}",
-                        e
-                    )));
+                    return Err(connect_error(e));
                 }
             }
 
-            let mut guard = session_arc.lock().await;
-            *guard = Some(Arc::new(session));
-
-            Ok(())
+            Ok((Arc::new(session), process))
         };
-
         if timeout > 0 {
             match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
                 Ok(res) => res,
@@ -613,38 +657,272 @@ impl AsyncConnection {
         }
     }
 
+    // All replacement and subsystem setup share this gate across Python futures and clones.
+    async fn publish(
+        &self,
+        session: Arc<Handle<ClientHandler>>,
+        process: Option<Child>,
+        generation: u64,
+    ) -> PyResult<()> {
+        let mut session_guard = self.session.lock().await;
+        let mut sftp = self.sftp_session.lock().await;
+        let mut proxy = self.proxy_process.lock().await;
+        if self.close_generation.load(Ordering::SeqCst) != generation {
+            return Err(PyRuntimeError::new_err(
+                "Connection closed during establishment",
+            ));
+        }
+        *sftp = None;
+        if let Some(mut old) = proxy.take() {
+            let _ = old.start_kill();
+        }
+        *proxy = process;
+        *session_guard = Some(session);
+        self.lifecycle.store(1, Ordering::SeqCst);
+        if self.close_generation.load(Ordering::SeqCst) != generation {
+            self.lifecycle.store(2, Ordering::SeqCst);
+            *session_guard = None;
+            *proxy = None;
+            return Err(PyRuntimeError::new_err(
+                "Connection closed during establishment",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn connect_async(&self, timeout: Option<u64>) -> PyResult<()> {
+        let generation = self.close_generation.load(Ordering::SeqCst);
+        self.until_closed(generation, async {
+            let _gate = self.replacement.lock().await;
+            let (session, process) = self.establish(timeout).await?;
+            self.publish(session, process, generation).await
+        })
+        .await
+    }
+
+    async fn clear_transport(&self) {
+        *self.sftp_session.lock().await = None;
+        *self.session.lock().await = None;
+        if let Some(mut child) = self.proxy_process.lock().await.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
+
+    async fn install(&self, generation: u64) -> PyResult<()> {
+        self.clear_transport().await;
+        if self.close_generation.load(Ordering::SeqCst) != generation {
+            return Err(PyRuntimeError::new_err("Connection closed during recovery"));
+        }
+        let (session, process) = self.establish(None).await?;
+        self.publish(session, process, generation).await
+    }
+
+    async fn reconnect_async(&self, policy: RetryPolicy, generation: u64) -> PyResult<()> {
+        // Caller holds replacement, so failed old sessions cannot replace newer ones.
+        for attempt in 0..=policy.retries {
+            if attempt > 0 {
+                tokio::time::sleep(policy.delay(attempt - 1)).await;
+            }
+            match self.install(generation).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if !retryable(&e) {
+                        return Err(e);
+                    }
+                    if attempt == policy.retries {
+                        return Err(recovery::exhausted(attempt + 1, e));
+                    }
+                }
+            }
+        }
+        unreachable!("explicit recovery attempts once")
+    }
+
+    async fn try_setup(&self, sftp: bool, budget: &mut Option<Duration>) -> PyResult<Prepared> {
+        let started = Instant::now();
+        let run = async {
+            let session = self
+                .session
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| HusshConnectionError::new_err("Disconnected"))?;
+            if sftp {
+                let cached = self.sftp_session.lock().await.clone();
+                if let Some(cached) = cached {
+                    match cached.canonicalize(".").await {
+                        Ok(_) => {}
+                        Err(russh_sftp::client::error::Error::Status(status))
+                            if !matches!(
+                                status.status_code,
+                                russh_sftp::protocol::StatusCode::NoConnection
+                                    | russh_sftp::protocol::StatusCode::ConnectionLost
+                            ) => {}
+                        Err(error) => return Err(sftp_setup_error(error, &session)),
+                    }
+                    return Ok(Prepared::Sftp(cached));
+                }
+            }
+            let mut channel = session
+                .channel_open_session()
+                .await
+                .map_err(connect_error)?;
+            if !sftp {
+                return Ok(Prepared::Channel(channel));
+            }
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(connect_error)?;
+            loop {
+                match channel.wait().await {
+                    Some(russh::ChannelMsg::Success) => break,
+                    Some(russh::ChannelMsg::Failure) => {
+                        let _ = channel.close().await;
+                        return Err(PyRuntimeError::new_err("SFTP subsystem request rejected"));
+                    }
+                    None | Some(russh::ChannelMsg::Close) => {
+                        return Err(HusshConnectionError::new_err(
+                            "Transport closed during SFTP setup",
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+            let sftp = Arc::new(
+                SftpSession::new(channel.into_stream())
+                    .await
+                    .map_err(|error| sftp_setup_error(error, &session))?,
+            );
+            *self.sftp_session.lock().await = Some(sftp.clone());
+            Ok(Prepared::Sftp(sftp))
+        };
+        let result = if let Some(remaining) = *budget {
+            if remaining.is_zero() {
+                return Err(PyTimeoutError::new_err(
+                    "Command timed out establishing channel",
+                ));
+            }
+            match tokio::time::timeout(remaining, run).await {
+                Ok(result) => result,
+                Err(_) => Err(PyTimeoutError::new_err(
+                    "Command timed out establishing channel",
+                )),
+            }
+        } else {
+            run.await
+        };
+        if let Some(remaining) = budget {
+            *remaining = remaining.saturating_sub(started.elapsed());
+        }
+        result
+    }
+
+    async fn prepare(&self, sftp: bool, budget: &mut Option<Duration>) -> PyResult<Prepared> {
+        let generation = self.close_generation.load(Ordering::SeqCst);
+        self.until_closed(generation, async {
+            let _gate = self.replacement.lock().await;
+            match self.lifecycle.load(Ordering::SeqCst) {
+                0 => {
+                    return Err(HusshConnectionError::new_err(
+                        "Not connected; call connect() or enter the context first",
+                    ))
+                }
+                2 => {
+                    return Err(HusshConnectionError::new_err(
+                        "Connection explicitly closed; use reconnect()",
+                    ))
+                }
+                _ => {}
+            }
+            let mut cause = match self.try_setup(sftp, budget).await {
+                Ok(prepared) => return Ok(prepared),
+                Err(error)
+                    if Python::attach(|py| error.is_instance_of::<HusshConnectionError>(py)) =>
+                {
+                    error
+                }
+                Err(error) => return Err(error),
+            };
+            let retries = if self.auto_reconnect {
+                self.max_retries
+            } else {
+                0
+            };
+            let policy = RetryPolicy::new(retries, self.retry_interval);
+            for attempt in 0..retries {
+                tokio::time::sleep(policy.delay(attempt)).await;
+                match self.install(generation).await {
+                    Ok(()) => {}
+                    Err(error) if retryable(&error) => {
+                        cause = error;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+                match self.try_setup(sftp, budget).await {
+                    Ok(prepared) => return Ok(prepared),
+                    Err(error)
+                        if Python::attach(|py| {
+                            error.is_instance_of::<HusshConnectionError>(py)
+                        }) =>
+                    {
+                        cause = error
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(recovery::exhausted(retries, cause))
+        })
+        .await
+    }
+
+    async fn open_channel(
+        &self,
+        budget: &mut Option<Duration>,
+    ) -> PyResult<russh::Channel<russh::client::Msg>> {
+        match self.prepare(false, budget).await? {
+            Prepared::Channel(channel) => Ok(channel),
+            _ => unreachable!("channel setup requested"),
+        }
+    }
+
+    async fn get_or_init_sftp(&self) -> PyResult<Arc<SftpSession>> {
+        match self.prepare(true, &mut None).await? {
+            Prepared::Sftp(sftp) => Ok(sftp),
+            _ => unreachable!("SFTP setup requested"),
+        }
+    }
+
     /// Internal async execute implementation - used by MultiConnection
     pub(crate) async fn execute_async(
         &self,
         command: String,
         timeout: Option<u64>,
     ) -> PyResult<SSHResult> {
-        let session_arc = self.session.clone();
-        let timeout = timeout.unwrap_or(0);
+        let mut budget = timeout
+            .filter(|timeout| *timeout > 0)
+            .map(Duration::from_secs);
+        let mut channel = self.open_channel(&mut budget).await?;
+        if budget.is_some_and(|remaining| remaining.is_zero()) {
+            return Err(PyTimeoutError::new_err("Command timed out"));
+        }
 
         let run = async {
-            let guard = session_arc.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-
-            // Clone the Arc<Handle>
-            let session = session.clone();
-            drop(guard);
-
-            let mut channel = session
-                .channel_open_session()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            channel
-                .exec(true, command)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            // Submission is the no-replay boundary, including a failed exec send.
+            channel.exec(true, command).await.map_err(|e| {
+                if transport_error(&e) {
+                    recovery::incomplete(e)
+                } else {
+                    PyRuntimeError::new_err(e.to_string())
+                }
+            })?;
 
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            let mut exit_code = 0;
+            let mut exit_code = None;
+            let mut closed = false;
 
             while let Some(msg) = channel.wait().await {
                 match msg {
@@ -656,25 +934,37 @@ impl AsyncConnection {
                             stderr.extend_from_slice(data);
                         }
                     }
-                    russh::ChannelMsg::ExitStatus { exit_status } => {
-                        exit_code = exit_status;
+                    russh::ChannelMsg::Failure => {
+                        return Err(PyRuntimeError::new_err("Command request rejected"))
                     }
+                    russh::ChannelMsg::ExitStatus { exit_status } => {
+                        exit_code = Some(exit_status as i32);
+                    }
+                    russh::ChannelMsg::ExitSignal { .. } => exit_code = Some(-1),
+                    russh::ChannelMsg::Close => closed = true,
                     _ => {}
                 }
             }
 
+            if !closed {
+                return Err(recovery::incomplete(
+                    "transport closed before command channel completion",
+                ));
+            }
             let stdout_str = String::from_utf8_lossy(&stdout).to_string();
             let stderr_str = String::from_utf8_lossy(&stderr).to_string();
 
             Ok(SSHResult {
                 stdout: stdout_str,
                 stderr: stderr_str,
-                status: exit_code as i32,
+                status: exit_code.ok_or_else(|| {
+                    recovery::incomplete("channel closed without an exit status or signal")
+                })?,
             })
         };
 
-        if timeout > 0 {
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout), run).await {
+        if let Some(remaining) = budget {
+            match tokio::time::timeout(remaining, run).await {
                 Ok(res) => res,
                 Err(_) => Err(PyTimeoutError::new_err("Command timed out")),
             }
@@ -685,6 +975,10 @@ impl AsyncConnection {
 
     /// Internal async close implementation - used by MultiConnection
     pub(crate) async fn close_async(&self) {
+        self.close_generation.fetch_add(1, Ordering::SeqCst);
+        self.lifecycle.store(2, Ordering::SeqCst);
+        self.close_notification.notify_waiters();
+        let _gate = self.replacement.lock().await;
         let mut sftp_guard = self.sftp_session.lock().await;
         *sftp_guard = None;
         let mut guard = self.session.lock().await;
@@ -703,9 +997,7 @@ impl AsyncConnection {
         remote_path: String,
         local_path: Option<String>,
     ) -> PyResult<String> {
-        let sftp =
-            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
-                .await?;
+        let sftp = self.get_or_init_sftp().await?;
 
         let mut remote_file = sftp
             .open(&remote_path)
@@ -747,9 +1039,7 @@ impl AsyncConnection {
         local_path: String,
         remote_path: Option<String>,
     ) -> PyResult<()> {
-        let sftp =
-            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
-                .await?;
+        let sftp = self.get_or_init_sftp().await?;
 
         let remote_p = remote_path.unwrap_or_else(|| local_path.clone());
 
@@ -791,9 +1081,7 @@ impl AsyncConnection {
         data: String,
         remote_path: String,
     ) -> PyResult<()> {
-        let sftp =
-            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
-                .await?;
+        let sftp = self.get_or_init_sftp().await?;
 
         let mut remote_file = sftp
             .create(&remote_path)
@@ -826,9 +1114,7 @@ impl AsyncConnection {
         preserve_permissions: bool,
         fail_fast: bool,
     ) -> PyResult<(Vec<String>, Vec<String>)> {
-        let sftp =
-            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
-                .await?;
+        let sftp = self.get_or_init_sftp().await?;
 
         let mut transferred: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
@@ -1037,9 +1323,7 @@ impl AsyncConnection {
         preserve_permissions: bool,
         fail_fast: bool,
     ) -> PyResult<(Vec<String>, Vec<String>)> {
-        let sftp =
-            AsyncConnection::get_or_init_sftp(self.session.clone(), self.sftp_session.clone())
-                .await?;
+        let sftp = self.get_or_init_sftp().await?;
 
         let mut transferred: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
@@ -1214,6 +1498,13 @@ impl AsyncConnection {
             username,
             password,
             key_path,
+            auto_reconnect: true,
+            max_retries: 3,
+            retry_interval: 1.5,
+            lifecycle: Arc::new(AtomicU8::new(0)),
+            close_generation: Arc::new(AtomicU64::new(0)),
+            close_notification: Arc::new(Notify::new()),
+            replacement: Arc::new(Mutex::new(())),
             session: Arc::new(Mutex::new(None)),
             sftp_session: Arc::new(Mutex::new(None)),
             config: Arc::new(config),
@@ -1226,7 +1517,7 @@ impl AsyncConnection {
     /// Create a FileTailer - used by MultiConnection
     pub(crate) fn create_tailer(&self, remote_file: String) -> AsyncFileTailer {
         AsyncFileTailer {
-            conn_session: self.session.clone(),
+            connection: self.clone(),
             remote_file,
             state: Arc::new(Mutex::new(TailerState {
                 sftp: None,
@@ -1242,7 +1533,7 @@ impl AsyncConnection {
 impl AsyncConnection {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (host, username=None, password=None, key_path=None, private_key=None, proxy_jump=None, proxy_command=None, port=22, keepalive_interval=0, timeout=0))]
+    #[pyo3(signature = (host, username=None, password=None, key_path=None, private_key=None, proxy_jump=None, proxy_command=None, port=22, keepalive_interval=0, timeout=0, *, auto_reconnect=true, max_retries=3, retry_interval=1.5))]
     pub fn new(
         _py: Python<'_>,
         host: String,
@@ -1255,6 +1546,9 @@ impl AsyncConnection {
         port: u16,
         keepalive_interval: u64,
         timeout: u64,
+        auto_reconnect: bool,
+        max_retries: i64,
+        retry_interval: f64,
     ) -> PyResult<Self> {
         if key_path.is_some() && private_key.is_some() {
             return Err(PyErr::new::<PyTypeError, _>(
@@ -1285,7 +1579,8 @@ impl AsyncConnection {
             proxy_command
         };
 
-        Ok(Self::create(
+        recovery::validate(max_retries, retry_interval)?;
+        let mut conn = Self::create(
             host,
             username,
             password,
@@ -1294,7 +1589,37 @@ impl AsyncConnection {
             port,
             keepalive_interval,
             timeout,
-        ))
+        );
+        conn.auto_reconnect = auto_reconnect;
+        conn.max_retries = max_retries;
+        conn.retry_interval = retry_interval;
+        Ok(conn)
+    }
+
+    #[pyo3(signature = (*, max_retries=None, retry_interval=None, max_interval=30.0))]
+    fn reconnect<'p>(
+        &self,
+        py: Python<'p>,
+        max_retries: Option<i64>,
+        retry_interval: Option<Bound<'_, PyAny>>,
+        max_interval: f64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let policy = RetryPolicy::overrides(
+            max_retries.unwrap_or(self.max_retries),
+            self.retry_interval,
+            retry_interval,
+            max_interval,
+        )?;
+        let conn = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let generation = conn.close_generation.load(Ordering::SeqCst);
+            conn.until_closed(generation, async {
+                let _gate = conn.replacement.lock().await;
+                conn.reconnect_async(policy, generation).await
+            })
+            .await?;
+            Ok(Python::attach(|py| py.None()))
+        })
     }
 
     #[pyo3(signature = (timeout=None))]
@@ -1393,10 +1718,9 @@ impl AsyncConnection {
 
     /// Lists the contents of a remote directory over SFTP.
     fn sftp_list<'p>(&self, py: Python<'p>, path: String) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
-        let sftp_arc = self.sftp_session.clone();
+        let conn = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sftp = AsyncConnection::get_or_init_sftp(session_arc, sftp_arc).await?;
+            let sftp = conn.get_or_init_sftp().await?;
 
             let entries = sftp
                 .read_dir(&path)
@@ -1463,21 +1787,12 @@ impl AsyncConnection {
         })
     }
 
+    #[pyo3(signature = (pty=None))]
     fn shell<'p>(&self, py: Python<'p>, pty: Option<bool>) -> PyResult<Bound<'p, PyAny>> {
-        let session_arc = self.session.clone();
+        let conn = self.clone();
         let pty = pty.unwrap_or(false);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = session_arc.lock().await;
-            let session = guard
-                .as_ref()
-                .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?;
-            let session = session.clone();
-            drop(guard);
-
-            let channel: russh::Channel<russh::client::Msg> = session
-                .channel_open_session()
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let channel = conn.open_channel(&mut None).await?;
 
             if pty {
                 channel
@@ -1645,7 +1960,7 @@ impl AsyncInteractiveShell {
 }
 
 struct TailerState {
-    sftp: Option<SftpSession>,
+    sftp: Option<Arc<SftpSession>>,
     init_pos: Option<u64>,
     last_pos: u64,
     contents: Option<String>,
@@ -1675,7 +1990,7 @@ struct TailerState {
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct AsyncFileTailer {
-    conn_session: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
+    connection: AsyncConnection,
     #[pyo3(get)]
     remote_file: String,
     state: Arc<Mutex<TailerState>>,
@@ -1732,26 +2047,10 @@ impl AsyncFileTailer {
 
     /// Internal async enter implementation - used by MultiFileTailer
     pub(crate) async fn enter_async(&self) -> PyResult<()> {
-        let guard = self.conn_session.lock().await;
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("Not connected"))?
-            .clone();
-        drop(guard);
-
-        let channel = session
-            .channel_open_session()
-            .await
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-        let sftp = SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        if self.state.lock().await.sftp.is_some() {
+            return Ok(());
+        }
+        let sftp = self.connection.get_or_init_sftp().await?;
 
         {
             let mut state_guard = self.state.lock().await;
