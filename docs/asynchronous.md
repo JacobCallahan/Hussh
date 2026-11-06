@@ -381,3 +381,70 @@ async with AsyncConnection(host="my.test.server", password="pass") as conn:
             print("Syslog:", await syslog.read())
             print("Auth log:", await authlog.read())
 ```
+
+## Connection recovery
+
+`Connection` and `AsyncConnection` automatically recover a lost transport before a new
+command, file operation, shell, or tailer is initialized. Recovery is enabled by default:
+`auto_reconnect=True, max_retries=3, retry_interval=1.5` (intervals are seconds).
+Choose `auto_reconnect=False` for immediate failure or when managing your own retries.
+Async connections still require `await connect()` or context entry before their first
+operation. Ordinary operations cannot reopen an explicitly closed connection.
+
+Automatic recovery waits before each of up to three fresh connection attempts. By
+default this adds up to 4.5 seconds of waiting, plus connection/authentication time.
+Retry counts bound attempts, not total elapsed time; configure a connection timeout
+when bounded failure latency matters. Authentication rejection, permission errors,
+invalid configuration, and application errors are not retried.
+
+Use `conn.reconnect()` (or `await conn.reconnect()`) to replace the session explicitly,
+even with automatic recovery disabled or after `close()`. It returns `None`, makes
+one immediate attempt, then up to `max_retries` additional attempts. Omitted values
+inherit constructor settings. Overrides affect only that call:
+
+```python
+conn.reconnect(max_retries=5, retry_interval="exponential", max_interval=30.0)
+# Async: await conn.reconnect(...)
+```
+
+Numeric intervals give fixed delays. Explicit `"exponential"` uses 1.5, 3, 6, ...
+seconds, capped at `max_interval`. Retry counts must be nonnegative integers;
+intervals must be nonnegative finite numbers. Exponential caps must be positive
+and finite. `max_retries=0` disables automatic attempts but still allows one
+explicit reconnect attempt.
+
+Command timeouts cover channel setup and command execution; recovery delays and
+fresh connection establishment are excluded. Async channel setup and execution
+share the same timeout budget. Existing timeout units remain:
+sync command/session timeouts use milliseconds; async timeouts use seconds.
+Timeouts still raise `TimeoutError`. Exhausted recovery raises
+`hussh.HusshConnectionError`, a `RuntimeError`, with the attempt count and cause.
+
+Commands are **never replayed after submission starts**, including failures during
+submission. An interrupted command raises `hussh.HusshIncompleteCommandError`
+(a subclass of `HusshConnectionError`) because execution may already have occurred.
+For a disruptive command such as a reboot, handle this uncertainty before reconnecting:
+
+```python
+from hussh import HusshIncompleteCommandError
+
+try:
+    conn.execute("reboot")
+except HusshIncompleteCommandError:
+    pass  # Verify the desired remote state before deciding to issue another command.
+conn.reconnect()
+```
+
+Commands terminated by an SSH exit signal return an `SSHResult` with `status=-1`
+and preserve stdout and stderr. A confirmed signal is a completed, unsuccessful
+command, rather than an incomplete-command error.
+
+Async `close()` interrupts pending connection establishment, channel/subsystem
+preparation, and recovery sleeps before closing the connection.
+
+A successful reconnect establishes a fresh authenticated session; it does not prove
+the host rebooted. File transfers recover only during transport/subsystem setup;
+once file access starts, failures propagate without replay, resumption, or rollback.
+Partially written files may remain. Existing shells and initialized tailers stay
+attached to their original sessions. `MultiConnection` inherits each connection's
+retry settings and retains its per-host error aggregation; it has no group reconnect API.
