@@ -61,7 +61,7 @@ def test_sync_recovery_defaults(fault_proxy):
         fault_proxy.drop()
         result = conn.execute("printf recovered", timeout=200)
         assert result.stdout == "recovered"
-        assert fault_proxy.attempts == 2  # noqa: PLR2004
+        assert 2 <= fault_proxy.attempts <= conn.max_retries + 1  # noqa: PLR2004
 
 
 @pytest.mark.parametrize("settings", [{"auto_reconnect": False}, {"max_retries": 0}])

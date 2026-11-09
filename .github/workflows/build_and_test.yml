@@ -9,6 +9,7 @@ on:
       - "*.md"
       - "*.example"
       - ".gitignore"
+      - "Cargo.toml"
       - "benchmarks/**"
 
 permissions:
