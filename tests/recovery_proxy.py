@@ -17,6 +17,7 @@ def _serve(control):  # noqa: C901, PLR0912, PLR0915
     selector.register(listener, selectors.EVENT_READ)
     selector.register(control, selectors.EVENT_READ)
     peers = {}
+    clients = set()
     accepted = 0
     timestamps = []
     held = []
@@ -33,10 +34,12 @@ def _serve(control):  # noqa: C901, PLR0912, PLR0915
                 selector.unregister(stream)
             stream.close()
         peers.clear()
+        clients.clear()
 
     def attach(client):
         upstream = socket.create_connection(("127.0.0.1", 8022), timeout=5)
         upstream.settimeout(None)
+        clients.add(client)
         peers[client] = upstream
         peers[upstream] = client
         if not paused:
@@ -96,7 +99,7 @@ def _serve(control):  # noqa: C901, PLR0912, PLR0915
                     except OSError:
                         disconnect()
                         continue
-                    if budget is not None:
+                    if budget is not None and stream in clients:
                         budget -= len(data)
                         if budget <= 0:
                             budget = None
@@ -112,6 +115,7 @@ def _serve(control):  # noqa: C901, PLR0912, PLR0915
                         peers.pop(other)
                         for closed in (stream, other):
                             selector.unregister(closed)
+                            clients.discard(closed)
                             closed.close()
     finally:
         disconnect()
